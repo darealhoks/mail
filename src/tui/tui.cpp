@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <sys/ioctl.h>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -102,8 +103,9 @@ std::string status(const std::string &mode, const std::string &msg, const std::s
     std::string right = " " + pos + " ";
     size_t used = utf8_len(bare) + utf8_len(right);
     std::string gap(used < width ? width - used : 0, ' ');
-    return c("1;33;40", " " + mode + " ") + c("37;40", (msg.empty() ? "" : " " + msg) + " " + gap) +
-           c("1;33;40", right);
+    return c("1;33;48;5;234", " " + mode + " ") +
+           c("38;5;250;48;5;234", (msg.empty() ? "" : " " + msg) + " " + gap) +
+           c("1;38;5;234;44", right);
 }
 
 int open_url(const std::string &url) {
@@ -204,6 +206,11 @@ int main(int argc, char **argv) {
             }
 
             char buf[64];
+            if (msg_at) {  // wake on the message deadline so it expires without a keypress
+                pollfd pf{0, POLLIN, 0};
+                long long left = 4000 - (now_ms() - msg_at);
+                if (poll(&pf, 1, (int)(left > 0 ? left : 0)) == 0) continue;
+            }
             ssize_t n = read(0, buf, sizeof buf);
             if (n <= 0) {
                 if (errno == EINTR) continue;
