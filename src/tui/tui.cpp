@@ -104,9 +104,8 @@ std::string status(const std::string &mode, const std::string &msg, const std::s
     size_t used = utf8_len(bare) + utf8_len(right);
     std::string gap(used < width ? width - used : 0, ' ');
     // colours mirror ~/.config/nvim/colors/theme.lua: ModeMsg, StatusLine, TabLineSel
-    const char *BAR = "48;2;7;11;20";
-    return c(std::string("1;38;2;224;199;155;") + BAR, " " + mode + " ") +
-           c(std::string("38;2;151;165;190;") + BAR, (msg.empty() ? "" : " " + msg) + " " + gap) +
+    return c("1;38;2;224;199;155;48;2;7;11;20", " " + mode + " ") +
+           c("38;2;151;165;190;48;2;7;11;20", (msg.empty() ? "" : " " + msg) + " " + gap) +
            c("1;38;2;7;11;20;48;2;127;163;212", right);
 }
 
