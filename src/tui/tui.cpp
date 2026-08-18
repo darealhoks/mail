@@ -1,7 +1,9 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,7 @@ using namespace paint;
 
 struct Post {
     std::vector<std::string> lines;  // painted, sgr included, one terminal row each
+    std::string url;
 };
 
 volatile sig_atomic_t resized = 1;
@@ -79,10 +82,35 @@ std::vector<Post> build(Store &s, size_t width) {
             p.lines.push_back(l == teams::TASK_NOTE ? c("1;33", "<" + l + ">") : link_up(c("37", l)));
         if (!i.url.empty() && config().flag("general.links")) p.lines.push_back(c("4;34", i.url));
         if (i.due_at) p.lines.push_back(c(due_color(i.due_at), when(i.due_at)));
+        p.url = i.url;
         p.lines.push_back("");
         out.push_back(std::move(p));
     }
     return out;
+}
+
+long long now_ms() {
+    timespec t{};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+// the whole ui keeps this line; mode chip left, transient action in the middle, position right
+std::string status(const std::string &mode, const std::string &msg, const std::string &pos,
+                   size_t width) {
+    std::string bare = " " + mode + " " + (msg.empty() ? "" : " " + msg) + " ";
+    std::string right = " " + pos + " ";
+    size_t used = utf8_len(bare) + utf8_len(right);
+    std::string gap(used < width ? width - used : 0, ' ');
+    return c("1;30;46", " " + mode + " ") + c("36;100", (msg.empty() ? "" : " " + msg) + " " + gap) +
+           c("1;30;46", right);
+}
+
+int open_url(const std::string &url) {
+    if (url.empty() || url.find('\'') != std::string::npos) return 1;
+    std::string opener = config().str("general.browser");
+    if (opener.empty()) opener = "xdg-open";
+    return system((opener + " '" + url + "' >/dev/null 2>&1 &").c_str()) == 0 ? 0 : 1;
 }
 
 int term_rows() {
@@ -110,6 +138,10 @@ int main(int argc, char **argv) {
         std::vector<std::string> flat;
         size_t sel = 0, top = 0;
         int rows = 24, cols = 80;
+        bool first = true;
+        std::string msg;
+        long long msg_at = 0, click_at = 0;
+        size_t click_post = (size_t)-1;
 
         enter();
         signal(SIGINT, die);
@@ -121,7 +153,7 @@ int main(int argc, char **argv) {
         for (;;) {
             if (resized) {
                 resized = 0;
-                rows = term_rows();
+                rows = term_rows() - 1;
                 cols = term_cols();
                 posts = build(store, (size_t)cols - 2);  // 2 = the selection bar column + a space
                 flat.clear();
@@ -134,10 +166,18 @@ int main(int argc, char **argv) {
                         owner.push_back(p);
                     }
                 }
-                if (sel >= posts.size()) sel = posts.empty() ? 0 : posts.size() - 1;
+                if (first || sel >= posts.size()) sel = posts.empty() ? 0 : posts.size() - 1;
+                first = false;
+            }
+            if (msg_at && now_ms() - msg_at > 4000) {
+                msg.clear();
+                msg_at = 0;
             }
             if (flat.empty()) {
-                fputs("\033[H\033[J\033[90mnothing to show — q to quit\033[0m", stdout);
+                std::string out = "\033[H\033[90mnothing to show\033[0m\033[K\033[J\033[" +
+                                  std::to_string(rows + 1) + ";1H" +
+                                  status("FEED", msg, "0/0", (size_t)cols);
+                fwrite(out.data(), 1, out.size(), stdout);
                 fflush(stdout);
             } else {
                 // keep the selected post visible: its top, or its tail if it is taller than the screen
@@ -156,7 +196,9 @@ int main(int argc, char **argv) {
                     out += "\033[K";
                     if (r < rows - 1) out += "\r\n";
                 }
-                out += "\033[J";
+                out += "\033[J\r\n" +
+                       status("FEED", msg, std::to_string(sel + 1) + "/" +
+                                               std::to_string(posts.size()), (size_t)cols);
                 fwrite(out.data(), 1, out.size(), stdout);
                 fflush(stdout);
             }
@@ -205,7 +247,19 @@ int main(int argc, char **argv) {
                     else if (btn == 65) move(1);
                     else if (btn == 0 && fin == 'M') {
                         size_t li = top + (size_t)(my - 1);
-                        if (li < flat.size()) sel = owner[li];
+                        if (li >= flat.size()) continue;
+                        sel = owner[li];
+                        long long t = now_ms();
+                        if (click_post == sel && t - click_at < 400) {
+                            msg = posts[sel].url.empty() ? "no link"
+                                  : open_url(posts[sel].url) == 0 ? "opened in browser"
+                                                                  : "open failed";
+                            msg_at = t;
+                            click_at = 0;
+                        } else {
+                            click_at = t;
+                            click_post = sel;
+                        }
                     }
                 }
             }
