@@ -102,8 +102,8 @@ std::string status(const std::string &mode, const std::string &msg, const std::s
     std::string right = " " + pos + " ";
     size_t used = utf8_len(bare) + utf8_len(right);
     std::string gap(used < width ? width - used : 0, ' ');
-    return c("1;30;46", " " + mode + " ") + c("36;100", (msg.empty() ? "" : " " + msg) + " " + gap) +
-           c("1;30;46", right);
+    return c("1;33;40", " " + mode + " ") + c("37;40", (msg.empty() ? "" : " " + msg) + " " + gap) +
+           c("1;33;40", right);
 }
 
 int open_url(const std::string &url) {
@@ -176,7 +176,7 @@ int main(int argc, char **argv) {
             if (flat.empty()) {
                 std::string out = "\033[H\033[90mnothing to show\033[0m\033[K\033[J\033[" +
                                   std::to_string(rows + 1) + ";1H" +
-                                  status("FEED", msg, "0/0", (size_t)cols);
+                                  status("feed", msg, "0/0", (size_t)cols);
                 fwrite(out.data(), 1, out.size(), stdout);
                 fflush(stdout);
             } else {
@@ -197,7 +197,7 @@ int main(int argc, char **argv) {
                     if (r < rows - 1) out += "\r\n";
                 }
                 out += "\033[J\r\n" +
-                       status("FEED", msg, std::to_string(sel + 1) + "/" +
+                       status("feed", msg, std::to_string(sel + 1) + "/" +
                                                std::to_string(posts.size()), (size_t)cols);
                 fwrite(out.data(), 1, out.size(), stdout);
                 fflush(stdout);
