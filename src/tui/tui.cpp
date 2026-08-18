@@ -103,9 +103,11 @@ std::string status(const std::string &mode, const std::string &msg, const std::s
     std::string right = " " + pos + " ";
     size_t used = utf8_len(bare) + utf8_len(right);
     std::string gap(used < width ? width - used : 0, ' ');
-    return c("1;33;48;5;234", " " + mode + " ") +
-           c("38;5;250;48;5;234", (msg.empty() ? "" : " " + msg) + " " + gap) +
-           c("1;38;5;234;44", right);
+    // colours mirror ~/.config/nvim/colors/theme.lua: ModeMsg, StatusLine, TabLineSel
+    const char *BAR = "48;2;7;11;20";
+    return c(std::string("1;38;2;224;199;155;") + BAR, " " + mode + " ") +
+           c(std::string("38;2;151;165;190;") + BAR, (msg.empty() ? "" : " " + msg) + " " + gap) +
+           c("1;38;2;7;11;20;48;2;127;163;212", right);
 }
 
 int open_url(const std::string &url) {
@@ -194,7 +196,7 @@ int main(int argc, char **argv) {
                 for (int r = 0; r < rows; r++) {
                     size_t li = top + (size_t)r;
                     if (li < flat.size())
-                        out += (owner[li] == sel ? "\033[1;36m▎\033[0m " : "  ") + flat[li];
+                        out += (owner[li] == sel ? "\033[38;2;127;163;212m▎\033[0m " : "  ") + flat[li];
                     out += "\033[K";
                     if (r < rows - 1) out += "\r\n";
                 }
