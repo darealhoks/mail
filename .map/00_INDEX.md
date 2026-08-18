@@ -10,11 +10,13 @@
     src/core/     store config creds json http oauth notify term   — no source, no ui
     src/sources/  bakalari teams teams_auth classify + registry.h  — one pair per source
     src/view/     store -> row structs, pure: no printf, no ansi, no term width
+                  + paint.cpp: wrap/width/sgr helpers shared by cli and tui
     src/maild/    main.cpp     fetch loop, timers, notify
-    src/cli/      cli.cpp      argv, binds, layout, paint. the only place sgr literals live
+    src/cli/      cli.cpp      argv, binds, layout, paint
+    src/tui/      tui.cpp      raw-mode feed: scroll by post, keys + mouse, no flags
 
-`make` builds both binaries from `src/core src/sources src/view` plus one main each.
-`make check` runs both `--selfcheck`s; `make corpus` scores the classifier against
+`make` builds all three binaries from `src/core src/sources src/view` plus one main each.
+`make check` runs the two `--selfcheck`s; `make corpus` scores the classifier against
 `analysis/gold.tsv`.
 
 ## cli verbs

@@ -15,12 +15,15 @@ BUILD = build
 COMMON = $(filter-out src/sources/corpus_check.cpp,$(wildcard src/core/*.cpp src/sources/*.cpp src/view/*.cpp))  # corpus_check has its own main
 COMMON_OBJ = $(COMMON:%.cpp=$(BUILD)/%.o)
 
-all: $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c
+all: $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c $(BUILD)/$(NAME)t
 
 $(BUILD)/$(NAME)d: $(BUILD)/src/maild/main.o $(COMMON_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
 $(BUILD)/$(NAME)c: $(BUILD)/src/cli/cli.o $(COMMON_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
+
+$(BUILD)/$(NAME)t: $(BUILD)/src/tui/tui.o $(COMMON_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
 $(BUILD)/%.o: %.cpp
@@ -38,14 +41,14 @@ check: all
 	$(BUILD)/$(NAME)c --selfcheck
 
 install: all
-	install -Dm755 $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c -t $(DESTDIR)$(PREFIX)/bin
+	install -Dm755 $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c $(BUILD)/$(NAME)t -t $(DESTDIR)$(PREFIX)/bin
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/$(NAME)d $(DESTDIR)$(PREFIX)/bin/$(NAME)c
+	rm -f $(DESTDIR)$(PREFIX)/bin/$(NAME)d $(DESTDIR)$(PREFIX)/bin/$(NAME)c $(DESTDIR)$(PREFIX)/bin/$(NAME)t
 
 clean:
 	rm -rf $(BUILD)
 
--include $(COMMON_OBJ:.o=.d) $(BUILD)/src/maild/main.d $(BUILD)/src/cli/cli.d
+-include $(COMMON_OBJ:.o=.d) $(BUILD)/src/maild/main.d $(BUILD)/src/cli/cli.d $(BUILD)/src/tui/tui.d
 
 .PHONY: all corpus check install uninstall clean
