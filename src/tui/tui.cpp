@@ -213,6 +213,13 @@ int main(int argc, char **argv) {
             bool quit = false;
             while (!pending.empty()) {
                 std::string &b = pending;
+                auto open_sel = [&] {
+                    if (posts.empty()) return;
+                    msg = posts[sel].url.empty()          ? "no link"
+                          : open_url(posts[sel].url) == 0 ? "opened in browser"
+                                                          : "open failed";
+                    msg_at = now_ms();
+                };
                 auto move = [&](long d) {
                     if (posts.empty()) return;
                     long v = (long)sel + d;
@@ -222,6 +229,7 @@ int main(int argc, char **argv) {
                     quit = true;
                     break;
                 }
+                if (b[0] == '\r' || b[0] == '\n') { open_sel(); b.erase(0, 1); continue; }
                 if (b[0] == 'j') { move(1); b.erase(0, 1); continue; }
                 if (b[0] == 'k') { move(-1); b.erase(0, 1); continue; }
                 if (b[0] == 'g') { sel = 0; b.erase(0, 1); continue; }
@@ -251,10 +259,7 @@ int main(int argc, char **argv) {
                         sel = owner[li];
                         long long t = now_ms();
                         if (click_post == sel && t - click_at < 400) {
-                            msg = posts[sel].url.empty() ? "no link"
-                                  : open_url(posts[sel].url) == 0 ? "opened in browser"
-                                                                  : "open failed";
-                            msg_at = t;
+                            open_sel();
                             click_at = 0;
                         } else {
                             click_at = t;
