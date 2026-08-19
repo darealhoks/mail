@@ -105,6 +105,11 @@ int selfcheck() {
         CHECK(s.last_ok_fetch("teams") == 0);
         s.log_fetch("teams", 100, true, "", 1);
         CHECK(s.last_ok_fetch("teams") > 0);
+        CHECK(s.last_fetch("teams").failing_since == 0);
+        s.log_fetch("teams", 100, false, "boom", 0);
+        long long first = s.last_fetch("teams").failing_since;
+        s.log_fetch("teams", 100, false, "boom", 0);
+        CHECK(first && s.last_fetch("teams").failing_since == first);
     }
     remove(tmp.c_str());
 
@@ -230,6 +235,7 @@ int daemon_loop(bool cold, unsigned interval) {
         while (left && !quit && !wake) left = sleep(left);
         if (quit) break;
         wake = 0;
+        config_reload();
         rc = fetch_all(false);
     }
     return rc;

@@ -362,6 +362,16 @@ Store::Fetch Store::last_fetch(const std::string &source) {
             f.error.assign((const char *)v, sqlite3_column_bytes(s, 2));
     }
     sqlite3_finalize(s);
+    if (f.at && !f.ok) {
+        const char *q = "SELECT MIN(finished_at) FROM fetch_log WHERE source=?1 AND ok=0"
+                        " AND id > (SELECT COALESCE(MAX(id),0) FROM fetch_log"
+                        " WHERE source=?1 AND ok=1)";  // by id, not time: same-second runs tie
+        if (sqlite3_prepare_v2(db, q, -1, &s, nullptr) != SQLITE_OK)
+            throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
+        bind(s, 1, source);
+        if (sqlite3_step(s) == SQLITE_ROW) f.failing_since = sqlite3_column_int64(s, 0);
+        sqlite3_finalize(s);
+    }
     return f;
 }
 

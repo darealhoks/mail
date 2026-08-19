@@ -87,12 +87,15 @@ void usage() {
     fprintf(stderr, "       %s\n", c("90", CLI_NAME " help  for the full list", 2).c_str());
 }
 
+using paint::mark_color;
 using paint::due_color;
+using paint::accent;
 using paint::kind_color;
 using paint::link_up;
 using paint::NEW_CHIP;
 using paint::term_cols;
 using paint::utf8_len;
+using paint::plain_cut;
 using paint::when;
 using paint::wrap;
 
@@ -112,7 +115,7 @@ int show(const std::vector<std::string> &argf) {
             for (const auto &t : *g.second) list += (list.empty() ? "" : ", ") + t;
             std::string label = std::string(g.first) + ":";
             label.resize(9, ' ');
-            fprintf(stderr, "  %s%s\n", c("1;33", label, 2).c_str(), c("37", list, 2).c_str());
+            fprintf(stderr, "  %s%s\n", c("1;33", label, 2).c_str(), c("39", list, 2).c_str());
         }
         fprintf(stderr, "%s\n", c("90", "  " CLI_NAME " help  for more", 2).c_str());
         return 2;
@@ -144,7 +147,7 @@ int show(const std::vector<std::string> &argf) {
         printf("%s %s%s  %s %s %s\n", c("90", std::to_string(r.n)).c_str(),
                r.is_new ? (c(NEW_CHIP, " NEW ") + " ").c_str() : "",
                c("1", title.empty() ? "" : title[0] + (title.size() > 1 ? "…" : "")).c_str(),
-               c("1;36", "<" + r.klass + ">").c_str(),
+               c((std::string("1;") + accent()).c_str(), "<" + r.klass + ">").c_str(),
                c(kind_color(i.kind), "<" + i.kind + ">").c_str(),
                c("90", "<" + i.source + ">").c_str());
         // teams posts have no subject line, so their title is the first slice of the body
@@ -156,22 +159,12 @@ int show(const std::vector<std::string> &argf) {
             for (const auto &l : wrap(rest, width))
                 printf("%s\n", l == teams::TASK_NOTE  // set by teams.cpp, not a real body line
                                    ? c("1;33", "<" + l + ">").c_str()
-                                   : link_up(c("37", l)).c_str());
-        if (!i.url.empty() && config().flag("general.links")) printf("%s\n", c("4;34", i.url).c_str());
+                                   : link_up(l).c_str());
+        if (!i.url.empty() && config().flag("general.links")) printf("%s\n", c((std::string("4;") + accent()).c_str(), i.url).c_str());
         if (i.due_at) printf("%s\n", c(due_color(i.due_at), when(i.due_at)).c_str());
         putchar('\n');
     }
     return 0;
-}
-
-// mark 1..5 for a "<got>/<max>" text via school.points, 0 when it is not a fraction
-const char *mark_color(const std::string &t) {
-    static const char *SGR[] = {"1;32", "0;32", "0;33", "0;31", "1;31"};
-    int m = 0;
-    if (t.find('/') != std::string::npos) m = view::points_of(t);
-    else if (!t.empty() && t[0] >= mark_scale().first && t[0] <= mark_scale().second)
-        m = t[0] - mark_scale().first + 1;
-    return m >= 1 && m <= 5 ? SGR[m - 1] : "37";
 }
 
 int marks(const std::vector<std::string> &argf) {
@@ -181,10 +174,12 @@ int marks(const std::vector<std::string> &argf) {
     Store s;
     view::Marks m = view::marks_rows(s, filters, (size_t)config().num("general.limit"));
 
-    size_t wc = 0, wm_col = 0;
+    size_t wc = 0, wm_col = 0, dw = 0;
     for (const auto &r : m.rows) {
         wc = std::max(wc, utf8_len(r.klass));
         wm_col = std::max(wm_col, utf8_len(r.mark));
+        if (r.event_at)
+            dw = std::max(dw, utf8_len(paint::date_short(view::ymd_local(r.event_at))));
     }
 
     std::string period;
@@ -194,29 +189,21 @@ int marks(const std::vector<std::string> &argf) {
             period = r.period;
             printf("%s\n\n", c("1;90", "— " + period + " —").c_str());
         }
-        char d[16] = "??? ?? ";
-        if (r.event_at) {
-            struct tm tm {};
-            time_t tt = (time_t)r.event_at;
-            localtime_r(&tt, &tm);
-            strftime(d, sizeof d, "%d %b", &tm);
-        }
+        std::string d = r.event_at ? paint::date_short(view::ymd_local(r.event_at)) : "";
+        d.append(dw - std::min(dw, utf8_len(d)), ' ');
         std::string cls = r.klass;
         cls.append(wc - utf8_len(cls), ' ');
         printf("%s%s  %s  %s  %s\n", r.is_new ? (c(NEW_CHIP, " NEW ") + " ").c_str() : "",
-               c("90", d).c_str(), c("1;36", cls).c_str(),
+               c("90", d).c_str(),
+               c((std::string("1;") + accent()).c_str(), cls).c_str(),
                c(mark_color(r.mark), r.mark + std::string(wm_col - utf8_len(r.mark), ' ')).c_str(),
-               c("37", r.note).c_str());
+               c("39", r.note).c_str());
     }
     if (m.rows.empty())
         puts(c("90", filters.empty() ? "no marks" : "no marks for that subject").c_str());
-    for (const auto &[p, a] : m.averages) {
-        char v[16];
-        snprintf(v, sizeof v, "%.2f", a);
-        for (char &ch : v)
-            if (ch == '.') ch = ',';
-        printf("\n%s  %s", c("1;90", "average " + p).c_str(), c(mark_color(v), v).c_str());
-    }
+    for (const auto &[p, a] : m.averages)
+        printf("\n%s  %s", c("1;90", "average " + p).c_str(),
+               c(paint::avg_color(a), paint::avg_str(a)).c_str());
     if (!m.averages.empty()) putchar('\n');
     return 0;
 }
@@ -290,32 +277,57 @@ int timetable() {
     Store s;
     view::Timetable tt = view::timetable(s);
     if (tt.rows.empty()) {
-        printf("%s %s\n", c("1", "week " + tt.monday).c_str(), c("90", "— no lessons").c_str());
+        printf("%s %s\n", c("1", "week " + paint::date_short(tt.monday)).c_str(), c("90", "\u2014 no lessons").c_str());
         return 0;
     }
-    size_t w = 3;
-    for (const Lesson &l : tt.rows) w = std::max(w, utf8_len(l.label()));
+    const size_t gut = 3;
+    bool room = config().flag("table.room");
+    size_t need = 3;
+    for (const Lesson *l : tt.grid)
+        if (l) need = std::max(need, utf8_len(room ? l->label() : l->subject) + 2);  // +2 = padding
+    paint::TableLayout L = paint::table_layout(tt, need, (size_t)paint::term_cols(false), gut);
 
     static const char *DAYNAME[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
-    auto pad = [&](const std::string &t) { return t + std::string(w - utf8_len(t), ' '); };
+    auto centre = [&](const std::string &t) {
+        size_t n = std::min(L.cw, utf8_len(t)), l = (L.cw - n) / 2;
+        return std::string(l, ' ') + plain_cut(t, L.cw - l);
+    };
+    std::string bar;
+    for (size_t i = 0; i < gut; i++) bar += "\u2500";
+    for (size_t h = 0; h < tt.hours.size(); h++) {
+        bar += "\u253c";
+        for (size_t i = 0; i < L.cw; i++) bar += "\u2500";
+    }
+    bar += "\u253c";
+    std::string rule = c("90", bar);
+    auto row = [&](const std::string &head, const std::vector<std::string> &cells,
+                   const std::vector<const char *> &sgr) {
+        std::string line = head;
+        for (size_t i = 0; i < cells.size(); i++)
+            line += c("90", "\u2502") + c(sgr[i], centre(cells[i]));
+        printf("%s\n", (line + c("90", "\u2502")).c_str());
+    };
 
-    std::string head;
-    for (const auto &h : tt.hours) head += " " + pad(h);
-    printf("%s\n%s%s\n", c("1", "week " + tt.monday).c_str(), "  ", c("90", head).c_str());
+    printf("%s\n", c("1", "week " + paint::date_short(tt.monday)).c_str());
+    std::vector<const char *> plain(tt.hours.size(), "90");
+    row(std::string(gut, ' '), tt.hours, std::vector<const char *>(tt.hours.size(), "1"));
+    if (L.time_rows) row(std::string(gut, ' '), L.t0, plain);
+    if (L.time_rows == 2) row(std::string(gut, ' '), L.t1, plain);
+    printf("%s\n", rule.c_str());
     for (size_t di = 0; di < tt.days.size(); di++) {
         struct tm tm {};
         time_t t = (time_t)classify::epoch(tt.days[di]);
         gmtime_r(&t, &tm);
-        printf("%s", c("1;36", DAYNAME[tm.tm_wday]).c_str());
+        std::vector<std::string> cells;
+        std::vector<const char *> sgr;
         for (size_t hi = 0; hi < tt.hours.size(); hi++) {
             const Lesson *l = tt.at(di, hi);
-            std::string st = l ? l->state : "";
-            std::string cell = pad(l ? l->label() : "");
-            printf(" %s", st == "x"   ? c("42;30", cell).c_str()
-                          : st == "!" ? c("41;37", cell).c_str()
-                                      : cell.c_str());
+            cells.push_back(!l ? "" : room ? l->label() : l->subject);
+            sgr.push_back(!l ? "39" : l->state == "x" ? "42;30" : l->state == "!" ? "41;30" : "39");
         }
-        putchar('\n');
+        row(c((std::string("1;") + accent()).c_str(), std::string(DAYNAME[tm.tm_wday]) + " "), cells,
+            sgr);
+        printf("%s\n", rule.c_str());
     }
     return 0;
 }
@@ -389,7 +401,7 @@ int next_lesson() {
     long long now = (long long)time(nullptr);
     std::string day = bl.date == ymd_local(now) ? "" : std::string(DAYNAME[tm.tm_wday]) + " ";
     printf("%s%s  %s  %s\n", c("90", day).c_str(),
-           c("1;36", hhmm(bl.begins) + "-" + hhmm(bl.ends)).c_str(),
+           c((std::string("1;") + accent()).c_str(), hhmm(bl.begins) + "-" + hhmm(bl.ends)).c_str(),
            c("1", fmt_lesson(bl.subject_name.empty() ? "%s" : "%S (%s)", bl, best)).c_str(),
            c("90", trim(bl.room + (bl.teacher.empty() ? "" : "  " + bl.teacher) +
                         (bl.state == "!" ? "  changed" : "") + "  " + in_mins(best - now)))
@@ -493,9 +505,23 @@ int selfcheck() {
         return 1;
     }
     if (strcmp(mark_color("1"), mark_color("1-")) || !strcmp(mark_color("2"), mark_color("5")) ||
-        strcmp(mark_color("N"), "37") || strcmp(mark_color("45/50"), "1;32") ||
-        strcmp(mark_color("0/25"), "1;31") || strcmp(mark_color("5/0"), "37")) {
+        strcmp(mark_color("N"), "39") || strcmp(mark_color("45/50"), "1;32") ||
+        strcmp(mark_color("0/25"), "1;31") || strcmp(mark_color("5/0"), "39")) {
         fputs("selfcheck failed: mark_color\n", stderr);
+        return 1;
+    }
+    if (paint::avg_str(1.5) != "1,50 (2)" || paint::avg_str(2.494) != "2,49 (2)" ||
+        strcmp(paint::avg_color(1.4), mark_color("1")) ||
+        strcmp(paint::avg_color(1.5), mark_color("2"))) {
+        fputs("selfcheck failed: avg_str\n", stderr);
+        return 1;
+    }
+    if (paint::accent_sgr("Magenta") != "35" || paint::accent_sgr("brightcyan") != "96" ||
+        paint::accent_sgr("9") != "91" || paint::accent_sgr("208") != "38;5;208" ||
+        paint::accent_sgr("#7fa3d4") != "38;2;127;163;212" || paint::accent_sgr("nope") != "34" ||
+        paint::bg_sgr("31") != "41" || paint::bg_sgr("96") != "106" ||
+        paint::bg_sgr("38;5;208") != "48;5;208" || paint::bg_sgr("38;2;1;2;3") != "48;2;1;2;3") {
+        fputs("selfcheck failed: accent_sgr\n", stderr);
         return 1;
     }
     auto at = [](const char *iso) { return classify::epoch(iso); };
@@ -504,11 +530,10 @@ int selfcheck() {
         fputs("selfcheck failed: school_year\n", stderr);
         return 1;
     }
-    if (period_label(at("2025-09-10")) != "25/26 · H1 · Q1" ||
-        period_label(at("2025-12-01")) != "25/26 · H1 · Q2" ||
-        period_label(at("2026-01-20")) != "25/26 · H1 · Q2" ||
-        period_label(at("2026-03-01")) != "25/26 · H2 · Q3" ||
-        period_label(at("2026-05-01")) != "25/26 · H2 · Q4") {
+    if (period_label(at("2025-09-10")) != "25/26 · H1" ||
+        period_label(at("2026-01-20")) != "25/26 · H1" ||
+        period_label(at("2026-03-01")) != "25/26 · H2" ||
+        period_label(at("2026-05-01")) != "25/26 · H2") {
         fputs("selfcheck failed: period_label\n", stderr);
         return 1;
     }
@@ -628,7 +653,7 @@ int status() {
         names += (names.empty() ? "" : "|") + st.name;
     }
     printf("%s %s\n", c("90", "sign in with").c_str(),
-           c("1;36", CLI_NAME " auth " + names).c_str());
+           c((std::string("1;") + accent()).c_str(), CLI_NAME " auth " + names).c_str());
     return 0;
 }
 
@@ -714,7 +739,7 @@ int auth(int argc, char **argv) {
     for (const Source &src : sources()) names += (names.empty() ? "" : ", ") + std::string(src.name);
     fprintf(stderr, "%s %s\n", c("1;31", CLI_NAME ":", 2).c_str(),
             c("1", "no source '" + std::string(argv[0]) + "'", 2).c_str());
-    fprintf(stderr, "  %s%s\n", c("1;33", "sources:  ", 2).c_str(), c("37", names, 2).c_str());
+    fprintf(stderr, "  %s%s\n", c("1;33", "sources:  ", 2).c_str(), c("39", names, 2).c_str());
     fprintf(stderr, "%s\n", c("90", "  " CLI_NAME " auth  for the sign-in state", 2).c_str());
     return 2;
 }

@@ -39,6 +39,7 @@ $(BUILD)/corpus_check: $(BUILD)/src/sources/corpus_check.o $(BUILD)/src/sources/
 check: all
 	$(BUILD)/$(NAME)d --selfcheck
 	$(BUILD)/$(NAME)c --selfcheck
+	$(BUILD)/$(NAME)t --selfcheck
 
 install: all
 	install -Dm755 $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c $(BUILD)/$(NAME)t -t $(DESTDIR)$(PREFIX)/bin

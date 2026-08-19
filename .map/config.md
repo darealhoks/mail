@@ -13,6 +13,7 @@ pre-sections file keeps working; nothing is dropped.
     blacklist  anj   comma list; matched against the class abbrev and the raw class name
     years      auto  school years to scrape; auto = current one. list form: 25/26, 26/27
     stale_warn yes   warn when the store is older than the daemon's poll rate
+    marks_newest_last yes  marks oldest first, so the newest sit by the prompt; no = newest first
     notify           notification exec hook, empty = silent
     browser          opener for `mailc open`, default xdg-open
 
@@ -24,14 +25,34 @@ pre-sections file keeps working; nothing is dropped.
     [source.teams]
     enabled    yes
 
+    [table]
+    time       yes   the time row(s) over the timetable grid
+    room       yes   the room in each cell
+    teacher    yes   the teacher line (tui cells only, when there is vertical room)
+
     [school]
-    quarters   11-15, 01-31, 04-15   quarter end dates MM-DD, ordered from 1 Aug
+    half_end   01-31                 MM-DD H1 ends on (year rolls 1 Aug)
+    avg_round  1.5, 2.5, 3.5, 4.5    average floors for marks 2..5 (avg_mark())
     mark_scale 1-5                   best-worst mark digits
     points     90, 75, 60, 40        percent floors for marks 1..4 (points_mark())
+
+    [key]
+    f = feed                         tui mode switch; free-form keys, one char each
+    m = marks
+    t = timetable
 
     [bind]
     rozvrh = timetable               free-form keys, exempt from the unknown-key warning
     t      = next -s
+
+The timetable grid sizes itself in one place, `paint::table_layout` (`src/view/paint.cpp`),
+used by both `mailc timetable` and the tui: column width is the widest cell content the
+frontend will draw, clamped to what the terminal holds — never padded past it. The time
+header takes the widest form that fits, in order: `8:00-8:45`, `00-45`, start over end on
+two rows, none. `view::compact` drops any hour column and any day row nothing occupies, so a
+0th hour or a long tail costs nothing when the week does not use it. In the tui the block is
+centred in the pane both ways. Turning a `[table]` key off shrinks the grid: `time = no` alone frees the
+whole header and lets narrow columns hold the subject.
 
 `[bind]` maps a word of your own to a command line. `expand_bind` in `src/cli/cli.cpp` runs
 first in `main()` — before `take_flags` so flags inside a bind value are parsed, and before
@@ -40,6 +61,10 @@ even `help`). Only `--selfcheck` is unshadowable: it is a developer hook, not a 
 level of substitution: the first non-flag word only, value split on spaces, no recursion, no
 shell. A bind whose value names nothing fails exactly like that word typed by hand.
 `rozvrh = timetable` ships in the seeded file as the example.
+
+`[key]` is the tui's own: one character to `feed`, `marks` or `table`/`timetable`, read once
+at startup by `keymap()` in `src/tui/tui.cpp`. An unmapped char keeps the built-in f/m/t.
+
 
 Every key has a flag that overrides it for one run: `-n/--limit`,
 `--links/--no-links`, `-b/--blacklist`, `-B/--no-blacklist`, `-a/--all`. Flags are stripped
@@ -59,13 +84,14 @@ user types and matches ascii, so `Čeština` is `cestina`.
 `years` limits fetching only, never the store: nothing already stored is hidden or deleted
 when the year rolls, and dismissed stays dismissed (insert is OR IGNORE on (source,src_uid)).
 
-School year rolls on 1 August. Quarters come from `school.quarters`: with the default
-Q1 to 15 Nov, Q2 to 31 Jan (= H1), Q3 to 15 Apr, Q4 to 31 Jul. Any number of boundaries
-parses; H1 is Q1-Q2. Marks are printed under `— 25/26 · H1 · Q2 —` headers; the feed is not.
+School year rolls on 1 August; `school.half_end` splits it in two. Marks are printed under
+`— 25/26 · H1 —` headers, oldest first (`general.marks_newest_last`); the feed is not.
 
 Mark colors and the average both go through `school.points`/`school.mark_scale`
 (`points_mark`, `mark_scale` in config.h): a `got/max` mark is scored by percent floors, a
-plain digit by the scale, and `1-` is half a grade worse.
+plain digit by the scale, and `1-` is half a grade worse. An average prints as `1,50 (2)`
+(`paint::avg_str`/`avg_color`), the bracket being `avg_mark()` on `school.avg_round`. In the
+tui a subject whose every mark is ungradeable shows a green `N` instead.
 
 Blacklisted classes drop out of the feed before it is numbered, so `dismiss`/`open` indices
 stay contiguous.

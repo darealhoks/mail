@@ -74,8 +74,24 @@ struct Timetable {
     std::vector<std::string> hours;  // hour numbers, ascending
     std::vector<const Lesson *> grid;  // days.size() * hours.size(), null where free
     const Lesson *at(size_t day, size_t hour) const { return grid[day * hours.size() + hour]; }
+    // an hour column's start (end=false) or end time, from the first lesson that has them
+    std::string edge(size_t hour, bool end) const {
+        for (const Lesson &l : rows)
+            if (l.hour == hours[hour] && !l.begins.empty()) {
+                const std::string &t = end ? l.ends : l.begins;
+                return t.size() > 1 && t[0] == '0' ? t.substr(1) : t;
+            }
+        return "";
+    }
+    // "8:00-8:45"; empty when the hour has no stored times
+    std::string span(size_t hour) const {
+        std::string b = edge(hour, false);
+        return b.empty() ? b : b + "-" + edge(hour, true);
+    }
 };
 Timetable timetable(Store &s);
+// drop hour columns and day rows nothing occupies: a 0th hour or a long tail costs width
+void compact(Timetable &t);
 
 struct Next {
     enum State { None, NoTimes, Ok } state = None;

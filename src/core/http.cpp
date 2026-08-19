@@ -56,6 +56,7 @@ HttpResponse http_post_form(const std::string &url, const std::string &body,
     curl_easy_setopt(c.h, CURLOPT_URL, url.c_str());
     curl_easy_setopt(c.h, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(c.h, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    curl_easy_setopt(c.h, CURLOPT_POSTREDIR, (long)CURL_REDIR_POST_ALL);  // else a 301 turns the post into a get
     return with_headers(c.h, headers);
 }
 

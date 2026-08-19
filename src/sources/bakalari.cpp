@@ -22,17 +22,24 @@ namespace {
 
 const char *CREDS = "bakalari";
 
-std::string base() { return config().str("source.bakalari.url"); }
+std::string base() {
+    std::string u = config().str("source.bakalari.url");
+    // creds must not go out over the plaintext first hop curl would guess
+    if (!u.empty() && u.compare(0, 4, "http") != 0) u = "https://" + u;
+    return u;
+}
 
-const oauth::Config CFG{CREDS, config().str("source.bakalari.client_id"), base() + "/api/login",
-                        ""};
+// built per call: the url can be set from the tui sign-in, after static init has run
+oauth::Config cfg() {
+    return {CREDS, config().str("source.bakalari.client_id"), base() + "/api/login", ""};
+}
 
 long long now() { return (long long)time(nullptr); }
 
 using oauth::form;
 
 std::string access_token() {
-    return oauth::access_token(CFG, [](long status, const Json &) {
+    return oauth::access_token(cfg(), [](long status, const Json &) {
         return status == 400 || status == 401;
     });
 }
@@ -85,31 +92,47 @@ const long long DAY = 86400;
 
 
 void login(const std::string &user, const std::string &pass) {
-    std::string body = form("client_id", CFG.client_id) + "&" + form("grant_type", "password") + "&" +
+    std::string body = form("client_id", cfg().client_id) + "&" + form("grant_type", "password") + "&" +
                        form("username", user) + "&" + form("password", pass);
     HttpResponse r = http_post_form(base() + "/api/login", body);
     Json j(r.body);
     if (r.status != 200)
         throw std::runtime_error("bakalari: login failed (http " + std::to_string(r.status) + " " +
                                  j.str("error_description", j.str("error", "unknown")) + ")");
-    oauth::save_tokens(CFG, j);
+    oauth::save_tokens(cfg(), j);
 }
 
-bool have_session() { return oauth::have_session(CFG); }
+bool have_session() { return oauth::have_session(cfg()); }
+
+// one line of input, trimmed; empty (or eof) means the user backed out
+bool ask(const char *label, std::string &out) {
+    char buf[256];
+    printf("%s ", c("1", label).c_str());
+    fflush(stdout);
+    if (!fgets(buf, sizeof buf, stdin)) return false;
+    out = buf;
+    while (!out.empty() && isspace((unsigned char)out.back())) out.pop_back();
+    return !out.empty();
+}
 
 int login_interactive() {
-    char user[128];
-    printf("bakalari username: ");
-    fflush(stdout);
-    if (!fgets(user, sizeof user, stdin)) return 1;
-    std::string u(user);
-    while (!u.empty() && isspace((unsigned char)u.back())) u.pop_back();
-    char *pass = getpass("bakalari password: ");
-    if (!pass) return 1;
+    printf("%s\n", c("1;33", "Bakalari").c_str());
+    if (base().empty()) {
+        std::string url;
+        if (!ask("Url:", url)) return 1;
+        if (!config_save("source.bakalari.url", url))
+            fprintf(stderr, "%s\n", c("1;31", "could not write " + config_path()).c_str());
+    } else {
+        printf("%s\n", c("90", "url set in config, change in " + config_path()).c_str());
+    }
+    std::string u;
+    if (!ask("Username:", u)) return 1;
+    char *pass = getpass((c("1", "Password:") + " ").c_str());
+    if (!pass || !*pass) return 1;
     std::string p(pass);
     memset(pass, 0, p.size());
     login(u, p);
-    printf("%s %s\n", c("1;33", "bakalari").c_str(), c("1;32", "signed in").c_str());
+    printf("%s %s\n", c("1;33", "Bakalari").c_str(), c("1;32", "signed in").c_str());
     return 0;
 }
 

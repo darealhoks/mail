@@ -185,7 +185,6 @@ Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit
             double v = mark_value(i.title.substr(0, i.title.find(' ')));
             if (v <= 0) continue;
             std::string p = period_label(i.event_at ? i.event_at : i.fetched_at);
-            p = p.substr(0, p.rfind(" · "));  // drop the quarter, average is per half-year
             avg[p].first += i.weight * v;
             avg[p].second += i.weight;
         }
@@ -207,7 +206,29 @@ Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit
         r.note = caption + (body.empty() ? "" : (caption.empty() ? "" : " — ") + body);
         out.rows.push_back(std::move(r));
     }
+    if (config().flag("general.marks_newest_last")) std::reverse(out.rows.begin(), out.rows.end());
     return out;
+}
+
+void compact(Timetable &t) {
+    // an hour nobody has all week (a 0th hour, the long tail) is not a column worth its width
+    auto used = [&](size_t d, size_t h) { return t.grid[d * t.hours.size() + h] != nullptr; };
+    std::vector<size_t> keep_h, keep_d;
+    for (size_t h = 0; h < t.hours.size(); h++)
+        for (size_t d = 0; d < t.days.size(); d++)
+            if (used(d, h)) { keep_h.push_back(h); break; }
+    for (size_t d = 0; d < t.days.size(); d++)
+        for (size_t h = 0; h < t.hours.size(); h++)
+            if (used(d, h)) { keep_d.push_back(d); break; }
+    std::vector<const Lesson *> grid;
+    for (size_t d : keep_d)
+        for (size_t h : keep_h) grid.push_back(t.grid[d * t.hours.size() + h]);
+    std::vector<std::string> days, hours;
+    for (size_t d : keep_d) days.push_back(t.days[d]);
+    for (size_t h : keep_h) hours.push_back(t.hours[h]);
+    t.days = days;
+    t.hours = hours;
+    t.grid = grid;
 }
 
 Timetable timetable(Store &s) {
@@ -225,10 +246,12 @@ Timetable timetable(Store &s) {
     });
     t.grid.assign(t.days.size() * t.hours.size(), nullptr);
     for (const Lesson &l : t.rows) {
+        if (l.subject.empty()) continue;  // free periods are stored as empty lessons
         size_t d = std::find(t.days.begin(), t.days.end(), l.date) - t.days.begin();
         size_t h = std::find(t.hours.begin(), t.hours.end(), l.hour) - t.hours.begin();
         t.grid[d * t.hours.size() + h] = &l;
     }
+    compact(t);
     return t;
 }
 
@@ -284,7 +307,8 @@ std::vector<Gripe> gripes(Store &s) {
                 out.push_back({std::string(src) + ": never fetched, is " APP_NAME "d running?",
                                false});
         } else if (!f.ok) {
-            out.push_back({std::string(src) + ": last fetch failed " + ago(f.at) +
+            out.push_back({std::string(src) + ": fetch failing since " +
+                               ago(f.failing_since ? f.failing_since : f.at) +
                                (f.error.empty() ? "" : " — " + f.error),
                            true});
         } else if ((long long)time(nullptr) - f.at > limit && config().flag("general.stale_warn")) {

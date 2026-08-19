@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "store.h"
 #include "term.h"
@@ -27,17 +28,25 @@ const struct Default {
 } DEFAULTS[] = {
     {"general.notify", "wispctl notify", true},
     {"general.browser", "xdg-open", true},
+    {"general.accent", "blue", true},
+    {"general.bar", "#070b14", true},
     {"general.limit", "0", true},
     {"general.links", "no", true},
     {"general.blacklist", "anj", true},
     {"general.years", "auto", true},
     {"general.stale_warn", "yes", true},
     {"general.raw_names", "no", true},
+    {"general.date", "%-d. %-m.", true},  // strftime; the year is appended when it differs
+    {"general.marks_newest_last", "yes", true},
     {"source.bakalari.url", "", true},
     {"source.bakalari.enabled", "yes", true},
     {"source.bakalari.client_id", "ANDR", false},
     {"source.teams.enabled", "yes", true},
-    {"school.quarters", "11-15, 01-31, 04-15", true},
+    {"table.time", "yes", true},
+    {"table.room", "yes", true},
+    {"table.teacher", "yes", true},
+    {"school.half_end", "01-31", true},
+    {"school.avg_round", "1.5, 2.5, 3.5, 4.5", true},
     {"school.mark_scale", "1-5", true},
     {"school.points", "90, 75, 60, 40", true},
 };
@@ -49,7 +58,10 @@ const struct {
     {"general", "limit caps whichever listing runs (0 = all); every key here is also a flag", ""},
     {"source.bakalari", "one section per source; enabled = no hides the source everywhere", ""},
     {"source.teams", "", ""},
-    {"school", "quarter end dates MM-DD (year rolls 1 Aug), mark scale, percent floors 1..4", ""},
+    {"table", "what a timetable cell carries; each one off makes the grid narrower", ""},
+    {"school", "H1 end date MM-DD (year rolls 1 Aug), average rounding floors, mark scale, percent floors 1..4", ""},
+    {"key", "single-key mode switch in the tui; \"<char> = feed|marks|table\"",
+     "f          = feed\nm          = marks\nt          = timetable\n"},
     {"bind", "your own words for a command; a bind wins over the builtin verb of that name",
      "rozvrh     = timetable\n# t        = next -s\n"},
     {"classes", "short name for a raw class name the heuristic gets wrong; \"<raw> = <short>\"",
@@ -76,6 +88,7 @@ std::vector<std::string> split(const std::string &s, char sep) {
 }
 
 bool known(const std::string &key) {
+    if (!key.compare(0, 4, "key.")) return true;     // [key] keys are single tui keystrokes
     if (!key.compare(0, 5, "bind.")) return true;     // [bind] keys are the user's own words
     if (!key.compare(0, 8, "classes.")) return true;  // [classes] keys are raw class names
     for (const auto &d : DEFAULTS)
@@ -152,13 +165,10 @@ void load(Config &c) {
 // school-year ordering of a MM*100+DD date, so January sorts after November
 int roll(int md) { return md >= 801 ? md : md + 1200; }
 
-int quarter(const struct tm &tm) {
-    int k = roll((tm.tm_mon + 1) * 100 + tm.tm_mday), q = 1;
-    for (const auto &b : config().list("school.quarters")) {
-        int m = atoi(b.c_str()), d = atoi(b.c_str() + b.find('-') + 1);
-        if (k > roll(m * 100 + d)) q++;
-    }
-    return q;
+int half(const struct tm &tm) {
+    std::string b = config().str("school.half_end");
+    int m = atoi(b.c_str()), d = atoi(b.c_str() + b.find('-') + 1);
+    return roll((tm.tm_mon + 1) * 100 + tm.tm_mday) > roll(m * 100 + d) ? 2 : 1;
 }
 
 }  // namespace
@@ -196,6 +206,39 @@ std::string config_path() {
     return dir + "/config";
 }
 
+bool config_save(const std::string &key, const std::string &val) {
+    size_t dot = key.rfind('.');
+    if (dot == std::string::npos) return false;
+    std::string section = key.substr(0, dot), name = key.substr(dot + 1);
+    std::vector<std::string> lines;
+    {
+        std::ifstream f(config_path());
+        for (std::string l; std::getline(f, l);) lines.push_back(l);
+    }
+    std::string cur = "general";
+    bool done = false;
+    for (size_t i = 0; i < lines.size() && !done; i++) {
+        std::string t = trim(lines[i]);
+        if (!t.empty() && t[0] == '[') {
+            size_t e = t.find(']');
+            if (e != std::string::npos) cur = lower(trim(t.substr(1, e - 1)));
+            continue;
+        }
+        if (cur != section || t.empty() || t[0] == '#') continue;
+        size_t eq = t.find('=');
+        if (eq == std::string::npos || lower(trim(t.substr(0, eq))) != name) continue;
+        lines[i] = name + " = " + val;
+        done = true;
+    }
+    if (!done) lines.push_back("[" + section + "]"), lines.push_back(name + " = " + val);
+    std::ofstream o(config_path());
+    if (!o) return false;
+    for (const std::string &l : lines) o << l << "\n";
+    if (!o) return false;
+    config().set(key, val);
+    return true;
+}
+
 Config &config() {
     static Config c = [] {
         Config x;
@@ -203,6 +246,12 @@ Config &config() {
         return x;
     }();
     return c;
+}
+
+void config_reload() {
+    Config &c = config();
+    c.v.clear();
+    load(c);
 }
 
 std::string school_year(long long t) {
@@ -230,8 +279,7 @@ std::string period_label(long long t) {
     struct tm tm {};
     time_t tt = (time_t)t;
     localtime_r(&tt, &tm);
-    int q = quarter(tm);
-    return school_year(t) + " · H" + std::to_string(q < 3 ? 1 : 2) + " · Q" + std::to_string(q);
+    return school_year(t) + " · H" + std::to_string(half(tm));
 }
 
 std::vector<std::string> active_years() {
@@ -263,6 +311,14 @@ int points_mark(double pct) {
     return (int)floors.size() + 1;
 }
 
+int avg_mark(double avg) {
+    std::vector<std::string> floors = config().list("school.avg_round");
+    int m = 1;
+    for (const auto &f : floors)
+        if (avg >= atof(f.c_str())) m++;
+    return m;
+}
+
 std::pair<char, char> mark_scale() {
     std::string s = config().str("school.mark_scale");
     size_t d = s.find('-');
@@ -288,7 +344,28 @@ int config_check() {
 
     if (points_mark(95) != 1 || points_mark(80) != 2 || points_mark(10) != 5) return 1;
     if (mark_scale() != std::pair<char, char>{'1', '5'}) return 1;
+    if (avg_mark(1.49) != 1 || avg_mark(1.5) != 2 || avg_mark(2.49) != 2 || avg_mark(5) != 5)
+        return 1;
     if (seed_file().find("client_id") != std::string::npos) return 1;
     if (seed_file().find("[source.teams]\nenabled") == std::string::npos) return 1;
+
+    {  // config_save round-trip, in a throwaway config home
+        std::string dir = "/tmp/" APP_NAME "-cfgcheck-" + std::to_string(getpid());
+        mkdir(dir.c_str(), 0700);
+        const char *old = getenv("XDG_CONFIG_HOME");
+        std::string keep = old ? old : "";
+        setenv("XDG_CONFIG_HOME", dir.c_str(), 1);
+        std::ofstream(config_path()) << "[source.bakalari]\nurl        = \n";
+        bool ok = config_save("source.bakalari.url", "http://y");
+        Config back;
+        std::ifstream f(config_path());
+        parse(f, back, true);
+        unlink(config_path().c_str());
+        rmdir((dir + "/" APP_NAME).c_str());
+        rmdir(dir.c_str());
+        if (old) setenv("XDG_CONFIG_HOME", keep.c_str(), 1);
+        else unsetenv("XDG_CONFIG_HOME");
+        if (!ok || back.str("source.bakalari.url") != "http://y") return 1;
+    }
     return 0;
 }

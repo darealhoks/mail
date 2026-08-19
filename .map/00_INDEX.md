@@ -4,6 +4,7 @@
 - [sources.md](sources.md) — source module contract + registry; bakalari + teams protocol facts
 - [auth-ux.md](auth-ux.md) — teams session death handling, resign flow ux
 - [config.md](config.md) — config file sections and keys, flags, binds, school-year periods
+- [audit.md](audit.md) — 2026-08 full audit: measured footprint, ranked bugs, change/LoC/RAM table
 
 ## layout
 
@@ -13,7 +14,7 @@
                   + paint.cpp: wrap/width/sgr helpers shared by cli and tui
     src/maild/    main.cpp     fetch loop, timers, notify
     src/cli/      cli.cpp      argv, binds, layout, paint
-    src/tui/      tui.cpp      raw-mode feed: scroll by post, keys + mouse, no flags
+    src/tui/      tui.cpp      raw-mode feed/marks/timetable, tab strip, keys + mouse, no flags
 
 `make` builds all three binaries from `src/core src/sources src/view` plus one main each.
 `make check` runs the two `--selfcheck`s; `make corpus` scores the classifier against

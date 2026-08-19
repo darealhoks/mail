@@ -42,6 +42,7 @@ struct Store {
     long long last_ok_fetch(const std::string &source);
     struct Fetch {
         long long at = 0;
+        long long failing_since = 0;  // first failure of the current streak, 0 if the last run was ok
         bool ok = false;
         std::string error;
     };
