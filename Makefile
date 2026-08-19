@@ -1,16 +1,20 @@
 CXX ?= g++
 NAME ?= mail
 CXXFLAGS ?= -O2
-CXXFLAGS += -std=c++20 -Wall -Wextra -Wshadow -Wconversion -Wswitch-enum -Wlogical-op \
-            -Wduplicated-cond -Wduplicated-branches -Wnull-dereference
+CXXFLAGS += -std=c++20 -Wall -Wextra -Wshadow -Wconversion -Wswitch-enum -Wnull-dereference
+GCCONLY = -Wlogical-op -Wduplicated-cond -Wduplicated-branches  # clang has none of these
+CXXFLAGS += $(shell $(CXX) --version 2>/dev/null | grep -qi clang || echo $(GCCONLY))
 CPPFLAGS += -DAPP_NAME='"$(NAME)"' -Isrc/core -Isrc/sources -Isrc/view
 DEV ?= 1
 ifeq ($(DEV),1)
 CXXFLAGS += -Werror
 endif
-LIBS = -lcurl -lsqlite3 -lsimdjson
+PKGS = libcurl sqlite3 simdjson  # homebrew/BSD keep these outside the default search paths
+LIBS := $(shell pkg-config --libs $(PKGS) 2>/dev/null || echo -lcurl -lsqlite3 -lsimdjson)
+CPPFLAGS += $(shell pkg-config --cflags $(PKGS) 2>/dev/null)
 
-MAKEFLAGS += -j$(shell nproc)  # command-line -jN still wins (make takes the last)
+NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+MAKEFLAGS += -j$(NPROC)  # command-line -jN still wins (make takes the last)
 
 PREFIX ?= $(HOME)/.local
 BUILD = build
@@ -48,8 +52,9 @@ check-asan:  # system gcc lacks the sanitize USE flag
 	$(MAKE) check CXX=clang++ CXXFLAGS="-O1 -g -fsanitize=address,undefined -D_GLIBCXX_ASSERTIONS"
 	$(MAKE) clean
 
-install: all
-	install -Dm755 $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c $(BUILD)/$(NAME)t -t $(DESTDIR)$(PREFIX)/bin
+install: all  # not install -D/-t: bsd and macos install have neither
+	mkdir -p $(DESTDIR)$(PREFIX)/bin
+	install -m755 $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c $(BUILD)/$(NAME)t $(DESTDIR)$(PREFIX)/bin
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(NAME)d $(DESTDIR)$(PREFIX)/bin/$(NAME)c $(DESTDIR)$(PREFIX)/bin/$(NAME)t
