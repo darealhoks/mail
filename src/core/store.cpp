@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS lessons(
 );
 )";
 
+#define STR_(x) #x
+#define STR(x) STR_(x)
+constexpr int SCHEMA_VERSION = 1;
+
 void exec(sqlite3 *db, const char *sql) {
     char *err = nullptr;
     if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -61,6 +65,16 @@ void exec(sqlite3 *db, const char *sql) {
         sqlite3_free(err);
         throw std::runtime_error("store: " + m);
     }
+}
+
+int user_version(sqlite3 *db) {
+    sqlite3_stmt *s = nullptr;
+    int v = 0;
+    if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &s, nullptr) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW)
+        v = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return v;
 }
 
 void bind(sqlite3_stmt *s, int i, const std::string &v) {
@@ -102,15 +116,22 @@ Store::Store(const std::string &path) {
         sqlite3_close(db);
         throw std::runtime_error("store: " + m);
     }
-    exec(db, "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-    exec(db, SCHEMA);
-    // pre-weight databases: fails harmlessly once the column exists
-    sqlite3_exec(db, "ALTER TABLE items ADD COLUMN weight INTEGER NOT NULL DEFAULT 1", nullptr,
-                 nullptr, nullptr);
-    exec(db, "UPDATE items SET kind='task' WHERE kind='ukol'");
-    exec(db, "UPDATE items SET kind='info' WHERE kind='message'");
-    // drops the old '<source>.tt.<monday>' grid blobs; the lessons table replaced them
-    exec(db, "DELETE FROM state WHERE key LIKE '%.tt.%'");
+    // first, and alone: a busy_timeout armed later cannot cover the statements before it
+    exec(db, "PRAGMA busy_timeout=15000");
+    exec(db, "PRAGMA journal_mode=WAL");
+    // migrations write, so they must not run on every open — a reader would then need the
+    // write lock and fail against a fetching maild. bump with any SCHEMA/migration change
+    if (user_version(db) < SCHEMA_VERSION) {
+        exec(db, SCHEMA);
+        // pre-weight databases: fails harmlessly once the column exists
+        sqlite3_exec(db, "ALTER TABLE items ADD COLUMN weight INTEGER NOT NULL DEFAULT 1", nullptr,
+                     nullptr, nullptr);
+        exec(db, "UPDATE items SET kind='task' WHERE kind='ukol'");
+        exec(db, "UPDATE items SET kind='info' WHERE kind='message'");
+        // drops the old '<source>.tt.<monday>' grid blobs; the lessons table replaced them
+        exec(db, "DELETE FROM state WHERE key LIKE '%.tt.%'");
+        exec(db, "PRAGMA user_version=" STR(SCHEMA_VERSION));
+    }
 }
 
 Store::~Store() { sqlite3_close(db); }
