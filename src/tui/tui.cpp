@@ -10,7 +10,9 @@
 #include <vector>
 
 #include <sys/ioctl.h>
+#ifdef __linux__
 #include <sys/inotify.h>
+#endif
 #include <sys/stat.h>
 #include <poll.h>
 #include <termios.h>
@@ -118,7 +120,7 @@ std::string age_chip(Store &s, bool &red, long long &best) {
     std::string unsigned_names;
     for (const view::SourceStatus &st : view::status(s)) {
         if (st.fetched_at > best) best = st.fetched_at;
-        if (st.stale) red = true;
+        if (st.stale && !st.offline) red = true;
         if (!st.signed_in || !st.error.empty())
             unsigned_names += (unsigned_names.empty() ? "" : ", ") + std::string(st.pretty);
     }
@@ -474,13 +476,16 @@ int main(int argc, char **argv) {
 
         std::string pending;
         // the db, its wal and its shm all live here; maild renames/creates as well as writes
-        int ifd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        int ifd = -1;  // non-linux: stays -1, the db_stamp() stat poll below covers it
+#ifdef __linux__
+        ifd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
         if (ifd >= 0 &&
             inotify_add_watch(ifd, data_dir().c_str(),
                               IN_CLOSE_WRITE | IN_MODIFY | IN_CREATE | IN_MOVED_TO) < 0) {
             close(ifd);
             ifd = -1;
         }
+#endif
         long long stamp = db_stamp();  // ifd < 0 only: stat fallback
         for (;;) {
             if (resized) {
@@ -626,6 +631,7 @@ int main(int argc, char **argv) {
                 pollfd pf[2] = {{0, POLLIN, 0}, {ifd, POLLIN, 0}};
                 int nf = poll(pf, ifd >= 0 ? 2 : 1, (int)(left > 0 ? left : 0));
                 bool wrote = false;
+#ifdef __linux__
                 if (nf > 0 && ifd >= 0 && (pf[1].revents & POLLIN)) {
                     char eb[4096];
                     for (ssize_t n; (n = read(ifd, eb, sizeof eb)) > 0;)
@@ -635,6 +641,7 @@ int main(int argc, char **argv) {
                             q += sizeof(inotify_event) + ev->len;
                         }
                 }
+#endif
                 if (ifd < 0 && nf <= 0) {
                     long long now = db_stamp();
                     wrote = now != stamp;

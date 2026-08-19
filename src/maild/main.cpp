@@ -15,7 +15,9 @@
 #include "notify.h"
 #include "oauth.h"
 #include "registry.h"
+#include "http.h"
 #include "store.h"
+#include "view.h"
 #include "teams.h"
 
 namespace {
@@ -108,6 +110,12 @@ int selfcheck() {
         long long first = s.last_fetch("teams").failing_since;
         s.log_fetch("teams", 100, false, "boom", 0);
         CHECK(first && s.last_fetch("teams").failing_since == first);
+
+        for (const Source &src : sources()) s.log_fetch(src.name, 100, false, OFFLINE_TAG "x", 0);
+        CHECK(view::offline(s));
+        CHECK(view::gripes(s).size() == 1 && !view::gripes(s)[0].error);
+        s.log_fetch(sources()[0].name, 100, false, "http: boom", 0);
+        CHECK(!view::offline(s));
     }
     remove(tmp.c_str());
 
@@ -169,6 +177,7 @@ int fetch_all(bool cold_flag) {
     if (cold_flag) {
         store.clear_state("teams.delta.%");
         store.clear_state("teams.channels%");
+        store.clear_state("bakalari.swept_at");
     }
     bool tty = isatty(2);
     teams::progress = [tty](size_t done, size_t total, const std::string &what) {
@@ -216,7 +225,7 @@ int fetch_all(bool cold_flag) {
         } catch (const std::exception &e) {
             store.log_fetch(name, started, false, e.what(), 0);
             fprintf(stderr, "%s: %s\n", name, e.what());
-            rc = 1;
+            if (std::string(e.what()).rfind(OFFLINE_TAG, 0) != 0) rc = 1;  // no net is not a failure worth mailing from cron
         }
     };
     for (const Source &src : sources()) run(src.name, [&] { return src.fetch(store); });

@@ -466,8 +466,9 @@ void source_status(const view::SourceStatus &st) {
         line("session", "1;32", "ok", "");
         line("refreshed", "90", ago(st.refreshed_at), "");
     }
-    line("fetched", st.stale ? "1;31" : "0;32", ago(st.fetched_at),
-         st.stale && st.fetched_at ? "stale" : "");
+    bool loud = st.stale && !st.offline;
+    line("fetched", loud ? "1;31" : "0;32", ago(st.fetched_at),
+         st.offline ? "no internet" : loud && st.fetched_at ? "stale" : "");
 }
 
 // anything that reads the feed offers the sign-in first: a dead session means the store

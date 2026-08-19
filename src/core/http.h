@@ -7,6 +7,9 @@ struct HttpResponse {
     std::string body;
 };
 
+// prefix of the error message when the failure was plain lack of connectivity
+#define OFFLINE_TAG "offline: "
+
 // throws std::runtime_error on transport failure; http error codes come back in status
 HttpResponse http_post_form(const std::string &url, const std::string &body,
                             const std::vector<std::string> &headers = {});

@@ -110,7 +110,7 @@ struct SourceStatus {
     std::string name, pretty, error;
     bool signed_in = false;
     long long refreshed_at = 0, fetched_at = 0;
-    bool stale = false;
+    bool stale = false, offline = false;
 };
 std::vector<SourceStatus> status(Store &s);
 
@@ -121,6 +121,7 @@ struct Gripe {
     bool error;
 };
 std::vector<Gripe> gripes(Store &s);
+bool offline(Store &s);
 
 struct NewCounts {
     int msgs = 0, work = 0, marks = 0;

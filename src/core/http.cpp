@@ -2,7 +2,9 @@
 
 #include <curl/curl.h>
 
+#include <chrono>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -29,16 +31,36 @@ struct Curl {
     ~Curl() { curl_easy_cleanup(h); }
 };
 
+// one handle per thread so the connection (and its tls session) survives between calls
+CURL *handle() {
+    thread_local Curl c;
+    curl_easy_reset(c.h);  // drops every option including a stale CURLOPT_HTTPHEADER slist
+    return c.h;
+}
+
 HttpResponse perform(CURL *h, std::string &body) {
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, sink);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &body);
     curl_easy_setopt(h, CURLOPT_PROTOCOLS_STR, "https");
     curl_easy_setopt(h, CURLOPT_REDIR_PROTOCOLS_STR, "https");
     curl_easy_setopt(h, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1000L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 20L);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, 300L);
     curl_easy_setopt(h, CURLOPT_USERAGENT, APP_NAME "/0.1");
     CURLcode rc = curl_easy_perform(h);
-    if (rc != CURLE_OK) throw std::runtime_error(std::string("http: ") + curl_easy_strerror(rc));
+    if (rc != CURLE_OK && body.empty()) {  // no bytes written, so a replay cannot duplicate anything
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        rc = curl_easy_perform(h);
+    }
+    if (rc != CURLE_OK) {
+        // OFFLINE_TAG is matched in view.cpp: no connectivity is not a fault worth shouting about
+        bool off = rc == CURLE_COULDNT_RESOLVE_HOST || rc == CURLE_COULDNT_RESOLVE_PROXY ||
+                   rc == CURLE_COULDNT_CONNECT || rc == CURLE_OPERATION_TIMEDOUT ||
+                   rc == CURLE_SEND_ERROR || rc == CURLE_RECV_ERROR;
+        throw std::runtime_error(std::string(off ? OFFLINE_TAG : "http: ") + curl_easy_strerror(rc));
+    }
     HttpResponse r;
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &r.status);
     r.body = std::move(body);
@@ -52,9 +74,11 @@ HttpResponse with_headers(CURL *h, const std::vector<std::string> &headers) {
     if (hl) curl_easy_setopt(h, CURLOPT_HTTPHEADER, hl);
     try {
         HttpResponse r = perform(h, out);
+        curl_easy_setopt(h, CURLOPT_HTTPHEADER, nullptr);
         curl_slist_free_all(hl);
         return r;
     } catch (...) {
+        curl_easy_setopt(h, CURLOPT_HTTPHEADER, nullptr);
         curl_slist_free_all(hl);
         throw;
     }
@@ -64,18 +88,18 @@ HttpResponse with_headers(CURL *h, const std::vector<std::string> &headers) {
 
 HttpResponse http_post_form(const std::string &url, const std::string &body,
                             const std::vector<std::string> &headers) {
-    Curl c;
-    curl_easy_setopt(c.h, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(c.h, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(c.h, CURLOPT_POSTFIELDSIZE, (long)body.size());
-    return with_headers(c.h, headers);
+    CURL *h = handle();
+    curl_easy_setopt(h, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(h, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    return with_headers(h, headers);
 }
 
 HttpResponse http_get(const std::string &url, const std::vector<std::string> &headers) {
-    Curl c;
-    curl_easy_setopt(c.h, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(c.h, CURLOPT_FOLLOWLOCATION, 1L);  // posts never follow: a 302 would re-send creds
-    return with_headers(c.h, headers);
+    CURL *h = handle();
+    curl_easy_setopt(h, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);  // posts never follow: a 302 would re-send creds
+    return with_headers(h, headers);
 }
 
 std::string url_encode(const std::string &s) {

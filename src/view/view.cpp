@@ -8,6 +8,7 @@
 
 #include "classify.h"
 #include "config.h"
+#include "http.h"
 #include "oauth.h"
 
 namespace view {
@@ -293,8 +294,21 @@ Next next_lesson(Store &s) {
     return out;
 }
 
+// every source that ran last failed for lack of connectivity: not an error, just no net
+bool offline(Store &s) {
+    bool any = false;
+    for (const Source &src : sources()) {
+        Store::Fetch f = s.last_fetch(src.name);
+        if (!f.at) continue;
+        if (f.ok || f.error.rfind(OFFLINE_TAG, 0) != 0) return false;
+        any = true;
+    }
+    return any;
+}
+
 std::vector<SourceStatus> status(Store &s) {
     std::vector<SourceStatus> out;
+    bool off = offline(s);
     for (const Source &src : sources()) {
         SourceStatus st;
         st.name = src.name;
@@ -303,6 +317,7 @@ std::vector<SourceStatus> status(Store &s) {
         st.signed_in = src.have_session();
         if (st.signed_in && st.error.empty()) st.refreshed_at = oauth::last_refresh_at(src.name);
         st.fetched_at = s.last_ok_fetch(src.name);
+        st.offline = off;
         st.stale = !st.fetched_at || (long long)time(nullptr) - st.fetched_at > stale_after(s);
         out.push_back(std::move(st));
     }
@@ -311,6 +326,7 @@ std::vector<SourceStatus> status(Store &s) {
 
 std::vector<Gripe> gripes(Store &s) {
     std::vector<Gripe> out;
+    if (offline(s)) return {{"no internet, showing last data", false}};
     long long limit = stale_after(s), iv = atoll(s.get_state("daemon.interval").c_str());
     std::string rate = iv ? " (" + dur(iv) + ")" : "";
     for (const Source &source : sources()) {
