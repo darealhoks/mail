@@ -1,7 +1,7 @@
 # mail
 
 Read-only aggregator for school systems. `maild` fetches Bakaláři and MS Teams from cron
-into a local sqlite db; `mailc` prints from that db.
+into a local sqlite db; `mailc` prints from that db, `mailt` browses it in the terminal.
 
 Everything is local. No server, no cloud, no AI.
 
@@ -14,7 +14,11 @@ Everything is local. No server, no cloud, no AI.
 
 ## Build
 
-    make            # -> build/maild build/mailc
+    ./install.sh    # deps check, build, install, optional crontab entry
+
+or by hand:
+
+    make            # -> build/maild build/mailc build/mailt
     make check      # self-checks
     make install    # to ~/.local/bin
 
@@ -35,6 +39,12 @@ under another name (binaries, config dir, data dir).
 
     mailc dismiss <n> / open <n> # by feed index
 
+    mailt                        # WIP: the same store in a full-screen TUI
+
+`mailt` is a work in progress. `f` feed, `m` marks, `t` timetable, `enter` opens the
+selected post, `a` sign in, `r` fetch now, `q` quits; mouse and wheel work. It redraws
+when `maild` writes. Rebind the tabs in the config (`key.<char> = feed|marks|timetable`).
+
 Set your school's Bakaláři url in `~/.config/mail/config` (written with commented
 defaults on first run), then `mailc auth`.
 
@@ -45,6 +55,7 @@ defaults on first run), then `mailc auth`.
     src/view/     store rows -> render structs
     src/maild/    oneshot fetch, notify
     src/cli/      argv, layout, colors
+    src/tui/      full-screen frontend (WIP)
 
 One sqlite db (`~/.local/share/mail/mail.db`) is the only interface between them.
 Every fetch is logged; a failed or stale source is shown as failed or stale in every
