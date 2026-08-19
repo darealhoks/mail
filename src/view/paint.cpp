@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include "classify.h"
 #include "config.h"
+#include "teams.h"
 #include "term.h"
 #include "view.h"
 
@@ -127,11 +130,7 @@ std::string when(long long due) {
     char b[32];
     strftime(b, sizeof b, "%a %d %b %H:%M", &tm);
     long long d = due - (long long)time(nullptr);
-    std::string rel;
-    long long a = d < 0 ? -d : d;
-    if (a < 3600) rel = std::to_string(a / 60) + "m";
-    else if (a < 172800) rel = std::to_string(a / 3600) + "h";
-    else rel = std::to_string(a / 86400) + "d";
+    std::string rel = view::rel_span(d < 0 ? -d : d);
     return std::string(b) + (d < 0 ? "  (" + rel + " ago)" : "  (in " + rel + ")");
 }
 
@@ -246,6 +245,255 @@ TableLayout table_layout(const view::Timetable &tt, size_t need, size_t cols, si
     }
     L.cw = std::max<size_t>(2, std::min(cw, room));
     return L;
+}
+
+std::string fit(const std::string &l, size_t width) {
+    size_t vis = 0, i = 0, cut = 0;
+    bool over = false;
+    while (i < l.size()) {
+        if (l[i] == 27) {  // csi: esc [ ... final byte 0x40-0x7e
+            size_t j = i + 1;
+            if (j < l.size() && l[j] == '[') {
+                while (++j < l.size() && (l[j] < 0x40 || l[j] > 0x7e)) {}
+            }
+            i = j + 1;
+            continue;
+        }
+        if ((unsigned char)l[i] >> 6 != 2) {
+            if (vis == width) { over = true; break; }
+            if (vis + 1 == width) cut = i;
+            vis++;
+        }
+        i++;
+    }
+    if (!over) return l;
+    return l.substr(0, cut) + "…\033[0m";
+}
+
+std::string hhmm(const std::string &t) {
+    return t.size() > 1 && t[0] == '0' ? t.substr(1) : t;
+}
+
+int open_url(const std::string &url) {
+    if (url.empty() || url.find('\'') != std::string::npos) return 1;
+    std::string opener = config().str("general.browser");
+    if (opener.empty()) opener = "xdg-open";
+    return system((opener + " '" + url + "' >/dev/null 2>&1 &").c_str()) == 0 ? 0 : 1;
+}
+
+std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
+    std::string ac = std::string("1;") + accent();
+    std::vector<Post> out;
+    int bucket = -1;
+    for (const view::FeedRow &r : f.rows) {
+        const Item &i = f.items[r.n - 1];
+        Post p;
+        if (r.bucket != bucket) {
+            bucket = r.bucket;
+            p.lines.push_back(c("1;90", bucket == 0   ? "— no deadline —"
+                                        : bucket == 1 ? "— upcoming —"
+                                                      : "— overdue —"));
+        }
+        size_t chips = utf8_len(r.klass) + i.kind.size() + i.source.size() + 10;
+        std::vector<std::string> title = wrap(i.title, width > chips + 30 ? width - chips : 30);
+        p.lines.push_back((numbered ? c("90", std::to_string(r.n)) + " " : "") +
+                          (r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") +
+                          c("1", title.empty() ? "" : title[0] + (title.size() > 1 ? "…" : "")) +
+                          "  " + c(ac.c_str(), "<" + r.klass + ">") + " " +
+                          c(kind_color(i.kind), "<" + i.kind + ">") + " " +
+                          c("90", "<" + i.source + ">"));
+        // teams posts have no subject line, so their title is the first slice of the body
+        std::string rest = i.body.compare(0, i.title.size(), i.title) == 0
+                               ? i.body.substr(i.title.size())
+                               : i.body;
+        while (!rest.empty() && (rest[0] == ' ' || rest[0] == '|' || rest[0] == '\n'))
+            rest.erase(0, 1);
+        // urls get their own rows so they survive un-elided and copy clean
+        for (size_t at = rest.find("http"); at != std::string::npos; at = rest.find("http", at)) {
+            size_t end = rest.find_first_of(" \n\t", at);
+            if (end == std::string::npos) end = rest.size();
+            while (end > at && strchr(",.;:!?)]\"", rest[end - 1])) end--;
+            rest.insert(end, "\n");
+            if (at) rest.insert(at, "\n"), end++;
+            at = end + 1;
+        }
+        std::string link = std::string("4;") + accent();
+        for (const auto &l : wrap(rest, width)) {
+            if (l.compare(0, 4, "http") == 0 && l.find(' ') == std::string::npos)
+                p.lines.push_back(c(link.c_str(), l));
+            else p.lines.push_back(l == teams::TASK_NOTE  // set by teams.cpp, not a body line
+                                       ? c("1;33", "<" + l + ">")
+                                       : link_up(l));
+        }
+        if (!i.url.empty() && config().flag("general.links"))
+            p.lines.push_back(c(link.c_str(), i.url));
+        if (i.due_at) p.lines.push_back(c(due_color(i.due_at), when(i.due_at)));
+        p.url = i.url;
+        p.lines.push_back("");
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
+std::vector<std::string> mark_lines(const view::Marks &m, size_t width) {
+    std::vector<std::string> out;
+    size_t wc = 0, wm = 0, dw = 0;
+    bool multi = false;
+    for (const auto &r : m.rows) {
+        multi |= r.klass != m.rows[0].klass;
+        wc = std::max(wc, utf8_len(r.klass));
+        wm = std::max(wm, utf8_len(r.mark));
+        if (r.event_at) dw = std::max(dw, utf8_len(date_short(view::ymd_local(r.event_at))));
+    }
+    if (!multi) wc = 0;  // one subject: the column would repeat itself every row
+    // the NEW chip, the gaps and the gutter the frontends keep to the left of every row
+    size_t used = dw + wm + (wc ? wc + 2 : 0) + 12;
+    std::string ac = std::string("1;") + accent();
+    std::string period;
+    for (const auto &r : m.rows) {
+        if (r.period != period) {
+            if (!period.empty()) out.push_back("");
+            period = r.period;
+            out.push_back(c("1;90", "— " + period + " —"));
+        }
+        std::string d = r.event_at ? date_short(view::ymd_local(r.event_at)) : "";
+        d.append(dw - std::min(dw, utf8_len(d)), ' ');
+        std::string note = plain_cut(r.note, width > used + 8 ? width - used : 8);
+        while (!note.empty() && note.back() == ' ') note.pop_back();
+        out.push_back((r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") + c("90", d) + "  " +
+                      (wc ? c(ac.c_str(), r.klass + std::string(wc - utf8_len(r.klass), ' ')) + "  "
+                          : "") +
+                      c(mark_color(r.mark), r.mark + std::string(wm - utf8_len(r.mark), ' ')) +
+                      "  " + c("39", note));
+    }
+    for (const auto &[k, p, a] : m.averages) {
+        out.push_back("");
+        out.push_back(c("1;90", "average " + (multi ? k + " " : "") + p) + "  " +
+                      c(avg_color(a), avg_str(a)));
+    }
+    return out;
+}
+
+std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t ch, int rows,
+                                    int cols, Geom &g) {
+    static const char *DAYNAME[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
+    std::string ac = std::string("1;") + accent();
+    std::vector<std::string> out;
+    g.nd = tt.days.size();
+    g.nh = tt.hours.size();
+    if (!g.nd || !g.nh) {
+        out.push_back(c("90", "week ") + c(ac.c_str(), date_short(tt.monday)) +
+                      c("90", " — no lessons"));
+        return out;
+    }
+    // the widest cell content decides the width; vertical room decides how many lines a cell gets
+    size_t need = 3;
+    for (const Lesson *l : tt.grid) {
+        if (!l) continue;
+        need = std::max(need, utf8_len(l->subject));
+        if (config().flag("table.room")) need = std::max(need, utf8_len(l->room));
+        if (config().flag("table.teacher")) need = std::max(need, utf8_len(l->teacher));
+    }
+    TableLayout L = table_layout(tt, need + 2, (size_t)cols, g.gut);
+    size_t cw = L.cw;
+    size_t head = 2 + L.time_rows;
+    bool fills = rows > 0;  // the tui owns a pane; the cli just prints the block and moves on
+    size_t cell_rows = 1;
+    if (fills) {
+        size_t avail = (size_t)rows > head ? (size_t)rows - head : 1;
+        size_t per_day = avail / g.nd;
+        if (L.room && per_day >= 3) cell_rows = 2;
+        if (L.teacher && cell_rows == 2 && per_day >= 4) cell_rows = 3;
+    }
+    int tier = (int)cell_rows - 1;
+    g.cw = cw;
+    g.blk = cell_rows + 1;  // the rule under each day belongs to its block
+
+    auto centre = [&](const std::string &t) {
+        size_t n = std::min(cw, utf8_len(t)), l = (cw - n) / 2;
+        return std::string(l, ' ') + plain_cut(t, cw - l);
+    };
+    std::string bar = "│";
+    std::string rule;
+    for (size_t i = 0; i < g.gut; i++) rule += "─";
+    for (size_t h = 0; h < g.nh; h++) {
+        rule += "┼";
+        for (size_t i = 0; i < cw; i++) rule += "─";
+    }
+    rule += "┼";
+
+    std::vector<std::string> hd(head - 1, std::string(g.gut, ' '));
+    for (size_t h = 0; h < g.nh; h++) {
+        hd[0] += c("90", bar) + c("1", centre(tt.hours[h]));
+        for (size_t r = 1; r < hd.size(); r++)
+            hd[r] += c("90", bar) + c("90", centre(r == 1 ? L.t0[h] : L.t1[h]));
+    }
+    out.push_back(c("90", "week ") + c(ac.c_str(), date_short(tt.monday)));
+    for (const auto &h : hd) out.push_back(h + c("90", bar));
+    out.push_back(c("90", rule));
+    g.top = out.size();
+
+    std::string today = view::ymd_local((long long)time(nullptr));
+    for (size_t d = 0; d < g.nd; d++) {
+        struct tm tm {};
+        time_t t = (time_t)classify::epoch(tt.days[d]);
+        gmtime_r(&t, &tm);
+        std::vector<std::string> block(cell_rows);
+        for (size_t r = 0; r < cell_rows; r++)
+            block[r] = (r == 0 ? c(tt.days[d] == today ? ac.c_str() : "90", DAYNAME[tm.tm_wday])
+                               : std::string(2, ' ')) +
+                       " ";
+        for (size_t h = 0; h < g.nh; h++) {
+            const Lesson *l = tt.at(d, h);
+            std::vector<std::string> txt(cell_rows);
+            if (l) {
+                txt[0] = l->subject;
+                if (cell_rows > 1) txt[1] = l->room;
+                if (cell_rows > 2) txt[2] = l->teacher;
+            }
+            bool cur = d == cd && h == ch;
+            std::string st = !l                ? "90"
+                             : l->state == "x" ? "42;30"
+                             : l->state == "!" ? "41;30"
+                                               : "39";
+            for (size_t r = 0; r < cell_rows; r++) {
+                // the cursor is a bold cell with a trailing star, so it survives a colour-blind
+                // terminal and still shows the state background
+                bool star = cur && r == 0 && cw > 1;
+                size_t avail = star ? cw - 1 : cw;  // the star only limits the text, never shifts it
+                std::string sgr = (cur ? "1;" : "") + (r == 0 || !l ? st : std::string("90"));
+                std::string body = txt[r], room;
+                // one-line cells still carry the room, kept grey next to the subject
+                if (r == 0 && tier == 0 && l && st == "39" && L.room &&
+                    utf8_len(body) + 1 + utf8_len(l->room) <= avail)
+                    room = l->room;
+                size_t n = utf8_len(body) + (room.empty() ? 0 : 1 + utf8_len(room));
+                if (n > avail) {
+                    body = plain_cut(body, avail);
+                    room.clear();
+                    n = avail;
+                }
+                size_t lead = (cw - n) / 2, trail = cw - n - lead - (star ? 1 : 0);
+                block[r] += c("90", bar) + c(sgr.c_str(), std::string(lead, ' ') + body) +
+                            (room.empty() ? "" : c("90", " " + room)) +
+                            c(sgr.c_str(), std::string(trail, ' ') + (star ? "*" : ""));
+            }
+        }
+        for (auto &b : block) out.push_back(b + c("90", bar));
+        out.push_back(c("90", rule));
+    }
+    // more columns than the terminal can hold: cut, never wrap — a wrap shears every row below
+    for (auto &line : out) line = fit(line, (size_t)cols);
+    if (!fills) return out;
+    // centre the block in the pane: the leftover columns split evenly, the leftover rows too
+    size_t used = g.gut + g.nh * (cw + 1) + 1;
+    g.left = (size_t)cols > used ? ((size_t)cols - used) / 2 : 0;
+    size_t pad = (size_t)rows > out.size() ? ((size_t)rows - out.size()) / 2 : 0;
+    if (g.left)
+        for (auto &line : out) line = std::string(g.left, ' ') + line;
+    out.insert(out.begin(), pad, std::string());
+    g.top += pad;
+    return out;
 }
 
 }  // namespace paint

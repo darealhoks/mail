@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "classify.h"
@@ -30,7 +29,6 @@ using view::fold;
 using view::local_at;
 using view::matches;
 using view::monday_of;
-using view::watermark;
 using view::ymd_local;
 using view::ymd_plus;
 
@@ -88,15 +86,8 @@ void usage() {
 }
 
 using paint::mark_color;
-using paint::due_color;
 using paint::accent;
-using paint::kind_color;
-using paint::link_up;
-using paint::NEW_CHIP;
 using paint::term_cols;
-using paint::utf8_len;
-using paint::plain_cut;
-using paint::when;
 using paint::wrap;
 
 int show(const std::vector<std::string> &argf) {
@@ -131,39 +122,8 @@ int show(const std::vector<std::string> &argf) {
         return 0;
     }
 
-    size_t width = (size_t)term_cols();
-    int bucket = -1;
-    for (const view::FeedRow &r : f.rows) {
-        const Item &i = f.items[r.n - 1];
-        if (r.bucket != bucket) {
-            bucket = r.bucket;
-            printf("%s\n", c("1;90", bucket == 0 ? "— no deadline —"
-                                     : bucket == 1 ? "— upcoming —"
-                                                   : "— overdue —")
-                                 .c_str());
-        }
-        size_t chips = utf8_len(r.klass) + i.kind.size() + i.source.size() + 10;
-        std::vector<std::string> title = wrap(i.title, width > chips + 30 ? width - chips : 30);
-        printf("%s %s%s  %s %s %s\n", c("90", std::to_string(r.n)).c_str(),
-               r.is_new ? (c(NEW_CHIP, " NEW ") + " ").c_str() : "",
-               c("1", title.empty() ? "" : title[0] + (title.size() > 1 ? "…" : "")).c_str(),
-               c((std::string("1;") + accent()).c_str(), "<" + r.klass + ">").c_str(),
-               c(kind_color(i.kind), "<" + i.kind + ">").c_str(),
-               c("90", "<" + i.source + ">").c_str());
-        // teams posts have no subject line, so their title is the first slice of the body
-        std::string rest = i.body.compare(0, i.title.size(), i.title) == 0
-                               ? i.body.substr(i.title.size())
-                               : i.body;
-        while (!rest.empty() && (rest[0] == ' ' || rest[0] == '|' || rest[0] == '\n')) rest.erase(0, 1);
-        if (!rest.empty())
-            for (const auto &l : wrap(rest, width))
-                printf("%s\n", l == teams::TASK_NOTE  // set by teams.cpp, not a real body line
-                                   ? c("1;33", "<" + l + ">").c_str()
-                                   : link_up(l).c_str());
-        if (!i.url.empty() && config().flag("general.links")) printf("%s\n", c((std::string("4;") + accent()).c_str(), i.url).c_str());
-        if (i.due_at) printf("%s\n", c(due_color(i.due_at), when(i.due_at)).c_str());
-        putchar('\n');
-    }
+    for (const paint::Post &p : paint::feed_posts(f, (size_t)term_cols(), true))
+        for (const std::string &l : p.lines) puts(l.c_str());
     return 0;
 }
 
@@ -173,38 +133,10 @@ int marks(const std::vector<std::string> &argf) {
 
     Store s;
     view::Marks m = view::marks_rows(s, filters, (size_t)config().num("general.limit"));
-
-    size_t wc = 0, wm_col = 0, dw = 0;
-    for (const auto &r : m.rows) {
-        wc = std::max(wc, utf8_len(r.klass));
-        wm_col = std::max(wm_col, utf8_len(r.mark));
-        if (r.event_at)
-            dw = std::max(dw, utf8_len(paint::date_short(view::ymd_local(r.event_at))));
-    }
-
-    std::string period;
-    for (const auto &r : m.rows) {
-        if (r.period != period) {
-            if (!period.empty()) putchar('\n');
-            period = r.period;
-            printf("%s\n\n", c("1;90", "— " + period + " —").c_str());
-        }
-        std::string d = r.event_at ? paint::date_short(view::ymd_local(r.event_at)) : "";
-        d.append(dw - std::min(dw, utf8_len(d)), ' ');
-        std::string cls = r.klass;
-        cls.append(wc - utf8_len(cls), ' ');
-        printf("%s%s  %s  %s  %s\n", r.is_new ? (c(NEW_CHIP, " NEW ") + " ").c_str() : "",
-               c("90", d).c_str(),
-               c((std::string("1;") + accent()).c_str(), cls).c_str(),
-               c(mark_color(r.mark), r.mark + std::string(wm_col - utf8_len(r.mark), ' ')).c_str(),
-               c("39", r.note).c_str());
-    }
+    if (filters.empty()) m.averages.clear();  // a mixed-subject average means nothing
+    for (const std::string &l : paint::mark_lines(m, (size_t)term_cols())) puts(l.c_str());
     if (m.rows.empty())
         puts(c("90", filters.empty() ? "no marks" : "no marks for that subject").c_str());
-    for (const auto &[p, a] : m.averages)
-        printf("\n%s  %s", c("1;90", "average " + p).c_str(),
-               c(paint::avg_color(a), paint::avg_str(a)).c_str());
-    if (!m.averages.empty()) putchar('\n');
     return 0;
 }
 
@@ -246,10 +178,7 @@ int open_item(int argc, char **argv) {
                 c("1", "item " + std::string(argv[0]) + " has no link", 2).c_str());
         return 1;
     }
-    if (url.find('\'') != std::string::npos) return 1;
-    std::string opener = config().str("general.browser");
-    if (opener.empty()) opener = "xdg-open";
-    return system((opener + " '" + url + "' >/dev/null 2>&1 &").c_str()) == 0 ? 0 : 1;
+    return paint::open_url(url);
 }
 
 int dismiss(int argc, char **argv) {
@@ -276,72 +205,16 @@ int dismiss(int argc, char **argv) {
 int timetable() {
     Store s;
     view::Timetable tt = view::timetable(s);
-    if (tt.rows.empty()) {
-        printf("%s %s\n", c("1", "week " + paint::date_short(tt.monday)).c_str(), c("90", "\u2014 no lessons").c_str());
-        return 0;
-    }
-    const size_t gut = 3;
-    bool room = config().flag("table.room");
-    size_t need = 3;
-    for (const Lesson *l : tt.grid)
-        if (l) need = std::max(need, utf8_len(room ? l->label() : l->subject) + 2);  // +2 = padding
-    paint::TableLayout L = paint::table_layout(tt, need, (size_t)paint::term_cols(false), gut);
-
-    static const char *DAYNAME[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
-    auto centre = [&](const std::string &t) {
-        size_t n = std::min(L.cw, utf8_len(t)), l = (L.cw - n) / 2;
-        return std::string(l, ' ') + plain_cut(t, L.cw - l);
-    };
-    std::string bar;
-    for (size_t i = 0; i < gut; i++) bar += "\u2500";
-    for (size_t h = 0; h < tt.hours.size(); h++) {
-        bar += "\u253c";
-        for (size_t i = 0; i < L.cw; i++) bar += "\u2500";
-    }
-    bar += "\u253c";
-    std::string rule = c("90", bar);
-    auto row = [&](const std::string &head, const std::vector<std::string> &cells,
-                   const std::vector<const char *> &sgr) {
-        std::string line = head;
-        for (size_t i = 0; i < cells.size(); i++)
-            line += c("90", "\u2502") + c(sgr[i], centre(cells[i]));
-        printf("%s\n", (line + c("90", "\u2502")).c_str());
-    };
-
-    printf("%s\n", c("1", "week " + paint::date_short(tt.monday)).c_str());
-    std::vector<const char *> plain(tt.hours.size(), "90");
-    row(std::string(gut, ' '), tt.hours, std::vector<const char *>(tt.hours.size(), "1"));
-    if (L.time_rows) row(std::string(gut, ' '), L.t0, plain);
-    if (L.time_rows == 2) row(std::string(gut, ' '), L.t1, plain);
-    printf("%s\n", rule.c_str());
-    for (size_t di = 0; di < tt.days.size(); di++) {
-        struct tm tm {};
-        time_t t = (time_t)classify::epoch(tt.days[di]);
-        gmtime_r(&t, &tm);
-        std::vector<std::string> cells;
-        std::vector<const char *> sgr;
-        for (size_t hi = 0; hi < tt.hours.size(); hi++) {
-            const Lesson *l = tt.at(di, hi);
-            cells.push_back(!l ? "" : room ? l->label() : l->subject);
-            sgr.push_back(!l ? "39" : l->state == "x" ? "42;30" : l->state == "!" ? "41;30" : "39");
-        }
-        row(c((std::string("1;") + accent()).c_str(), std::string(DAYNAME[tm.tm_wday]) + " "), cells,
-            sgr);
-        printf("%s\n", rule.c_str());
-    }
+    paint::Geom g;
+    for (const std::string &l : paint::grid_lines(tt, paint::NO_CELL, paint::NO_CELL, 0,
+                                                  paint::term_cols(false), g))
+        puts(l.c_str());
     return 0;
 }
 
-std::string hhmm(const std::string &t) {
-    return t.size() > 1 && t[0] == '0' ? t.substr(1) : t;
-}
+using paint::hhmm;
 
-std::string in_mins(long long d) {
-    if (d < 60) return "now";
-    if (d < 5400) return "in " + std::to_string(d / 60) + "m";
-    if (d < 172800) return "in " + std::to_string(d / 3600) + "h";
-    return "in " + std::to_string(d / 86400) + "d";
-}
+std::string in_mins(long long d) { return d < 60 ? "now" : "in " + view::rel_span(d); }
 
 std::string fmt_lesson(const std::string &f, const Lesson &l, long long start) {
     std::string o;

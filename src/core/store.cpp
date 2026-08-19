@@ -334,26 +334,28 @@ std::vector<Item> read_items(sqlite3_stmt *s) {
 }  // namespace
 
 // urgency increases downward: info, then upcoming (soonest last), then overdue (least overdue last)
-std::vector<Item> Store::feed() {
+std::vector<Item> Store::feed(long long since) {
     sqlite3_stmt *s = nullptr;
     std::string sql = std::string(COLS) +
-                      "WHERE dismissed=0 AND kind<>'mark'"
+                      "WHERE dismissed=0 AND kind<>'mark' AND id>?"
                       " ORDER BY CASE WHEN COALESCE(due_at,0)=0 THEN 0"
                       "   WHEN due_at>=strftime('%s','now') THEN 1 ELSE 2 END,"
                       " CASE WHEN COALESCE(due_at,0)=0 THEN COALESCE(event_at,fetched_at)"
                       "   WHEN due_at>=strftime('%s','now') THEN -due_at ELSE due_at END, id";
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, &s, nullptr) != SQLITE_OK)
         throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
+    sqlite3_bind_int64(s, 1, since);
     return read_items(s);
 }
 
-std::vector<Item> Store::marks() {
+std::vector<Item> Store::marks(long long since) {
     sqlite3_stmt *s = nullptr;
     std::string sql = std::string(COLS) +
-                      "WHERE dismissed=0 AND kind='mark'"
+                      "WHERE dismissed=0 AND kind='mark' AND id>?"
                       " ORDER BY COALESCE(event_at,fetched_at) DESC, id DESC";
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, &s, nullptr) != SQLITE_OK)
         throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
+    sqlite3_bind_int64(s, 1, since);
     return read_items(s);
 }
 

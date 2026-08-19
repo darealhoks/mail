@@ -16,13 +16,11 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include "classify.h"
 #include "config.h"
 #include "paint.h"
 #include "registry.h"
 #include "store.h"
 #include "term.h"
-#include "teams.h"
 #include "view.h"
 
 #define TUI_NAME APP_NAME "t"
@@ -34,13 +32,6 @@ using namespace paint;
 enum Mode { M_FEED, M_MARKS, M_TABLE, M_N };
 const char *MODE_NAME[M_N] = {"feed", "marks", "table"};
 
-struct Post {
-    std::vector<std::string> lines;  // painted, sgr included, one terminal row each
-    // rows painted flush to column 0 with no gutter and hard-wrapped, so a mouse drag copies
-    // the url whole; indices into lines
-    std::vector<size_t> bleed;
-    std::string url;
-};
 volatile sig_atomic_t resized = 1;
 void on_winch(int) { resized = 1; }
 
@@ -64,108 +55,6 @@ void enter() {
     tcsetattr(0, TCSANOW, &raw);
     // 1000 = button press/release + wheel, 1006 = sgr coords so columns past 223 still work
     fputs("\033[?1049h\033[?25l\033[?1000h\033[?1006h", stdout);
-}
-
-// split on codepoint boundaries at `width` columns; no ellipsis, nothing dropped
-std::vector<std::string> chop(const std::string &s, size_t width) {
-    std::vector<std::string> out;
-    size_t i = 0;
-    while (i < s.size()) {
-        size_t j = i, vis = 0;
-        while (j < s.size() && vis < width) {
-            while (++j < s.size() && (unsigned char)s[j] >> 6 == 2) {}
-            vis++;
-        }
-        out.push_back(s.substr(i, j - i));
-        i = j;
-    }
-    return out;
-}
-
-std::vector<Post> build(Store &s, size_t cols) {
-    size_t width = cols - 2;
-    view::Feed f = view::feed_rows(s, {}, (size_t)config().num("general.limit"));
-    std::vector<Post> out;
-    int bucket = -1;
-    for (const view::FeedRow &r : f.rows) {
-        const Item &i = f.items[r.n - 1];
-        Post p;
-        if (r.bucket != bucket) {
-            bucket = r.bucket;
-            p.lines.push_back(c("1;90", bucket == 0   ? "— no deadline —"
-                                        : bucket == 1 ? "— upcoming —"
-                                                      : "— overdue —"));
-        }
-        size_t chips = utf8_len(r.klass) + i.kind.size() + i.source.size() + 10;
-        std::vector<std::string> title = wrap(i.title, width > chips + 30 ? width - chips : 30);
-        p.lines.push_back((r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") +
-                          c("1", title.empty() ? "" : title[0] + (title.size() > 1 ? "…" : "")) +
-                          "  " + c((std::string("1;") + accent()).c_str(), "<" + r.klass + ">") + " " +
-                          c(kind_color(i.kind), "<" + i.kind + ">") + " " +
-                          c("90", "<" + i.source + ">"));
-        std::string rest = i.body.compare(0, i.title.size(), i.title) == 0
-                               ? i.body.substr(i.title.size())
-                               : i.body;
-        while (!rest.empty() && (rest[0] == ' ' || rest[0] == '|' || rest[0] == '\n')) rest.erase(0, 1);
-        // urls get their own full-width rows so they survive un-elided and copy clean
-        for (size_t at = rest.find("http"); at != std::string::npos; at = rest.find("http", at)) {
-            size_t end = rest.find_first_of(" \n\t", at);
-            if (end == std::string::npos) end = rest.size();
-            while (end > at && strchr(",.;:!?)]\"", rest[end - 1])) end--;
-            rest.insert(end, "\n");
-            if (at) rest.insert(at, "\n"), end++;
-            at = end + 1;
-        }
-        // a url that fits keeps the normal gutter; only one that has to wrap bleeds to column 0
-        auto push_url = [&](const std::string &u) {
-            std::string sgr = std::string("4;") + accent();
-            if (utf8_len(u) <= width) {
-                p.lines.push_back(c(sgr.c_str(), u));
-                return;
-            }
-            for (const auto &chunk : chop(u, cols)) {
-                p.bleed.push_back(p.lines.size());
-                p.lines.push_back(c(sgr.c_str(), chunk));
-            }
-        };
-        for (const auto &l : wrap(rest, width)) {
-            if (l.compare(0, 4, "http") == 0 && l.find(' ') == std::string::npos) {
-                push_url(l);
-                continue;
-            }
-            p.lines.push_back(l == teams::TASK_NOTE ? c("1;33", "<" + l + ">") : link_up(l));
-        }
-        if (!i.url.empty() && config().flag("general.links")) push_url(i.url);
-        if (i.due_at) p.lines.push_back(c(due_color(i.due_at), when(i.due_at)));
-        p.url = i.url;
-        p.lines.push_back("");
-        out.push_back(std::move(p));
-    }
-    return out;
-}
-// truncate a painted line to `width` visible columns, skipping sgr escapes; keeps the gutter
-// intact by never letting the terminal wrap a row
-std::string fit(const std::string &l, size_t width) {
-    size_t vis = 0, i = 0, cut = 0;
-    bool over = false;
-    while (i < l.size()) {
-        if (l[i] == 27) {  // csi: esc [ ... final byte 0x40-0x7e
-            size_t j = i + 1;
-            if (j < l.size() && l[j] == '[') {
-                while (++j < l.size() && (l[j] < 0x40 || l[j] > 0x7e)) {}
-            }
-            i = j + 1;
-            continue;
-        }
-        if ((unsigned char)l[i] >> 6 != 2) {
-            if (vis == width) { over = true; break; }
-            if (vis + 1 == width) cut = i;
-            vis++;
-        }
-        i++;
-    }
-    if (!over) return l;
-    return l.substr(0, cut) + "…\033[0m";
 }
 
 // changes when maild writes: wal carries the data until a checkpoint, so both files count
@@ -312,216 +201,44 @@ struct MarksView {
     std::vector<std::string> subjects;  // list level only: line -> subject to open
 };
 
-MarksView build_marks(Store &s, const view::Marks &snap, const std::string &subject,
-                      std::map<std::string, std::string> &avg_cache, size_t cols) {
+MarksView build_marks(const view::Marks &snap, const std::string &subject, size_t cols) {
     MarksView v;
-    // text and its colour, cached as "<sgr>\t<text>" so one string keeps both
-    auto avg_of = [&](const std::string &k) -> std::pair<std::string, std::string> {
-        auto it = avg_cache.find(k);
-        if (it == avg_cache.end()) {
-            view::Marks one = view::marks_rows(s, {view::fold(k)}, 0);
-            std::string cell;
-            if (!one.averages.empty()) {
-                double a = one.averages.back().second;
-                cell = std::string(paint::avg_color(a)) + "\t" + paint::avg_str(a);
-            } else if (!one.rows.empty()) {
-                cell = "39\tN";  // marks, none of them gradeable
-            }
-            it = avg_cache.emplace(k, cell).first;
-        }
-        size_t t = it->second.find('\t');
-        return t == std::string::npos ? std::make_pair(std::string(), std::string())
-                                      : std::make_pair(it->second.substr(0, t),
-                                                       it->second.substr(t + 1));
-    };
-
-    if (subject.empty()) {
-        std::vector<std::string> order;
-        std::map<std::string, std::pair<int, int>> tally;  // subject -> {marks, new}
-        for (const auto &r : snap.rows) {
-            if (!tally.count(r.klass)) order.push_back(r.klass);
-            tally[r.klass].first++;
-            tally[r.klass].second += r.is_new;
-        }
-        size_t wc = 3;
-        for (const auto &k : order) wc = std::max(wc, utf8_len(k));
-        for (const auto &k : order) {
-            auto [acol, a] = avg_of(k);
-            char n[32];
-            snprintf(n, sizeof n, "%d mark%s", tally[k].first, tally[k].first == 1 ? "" : "s");
-            v.lines.push_back(c((std::string("1;") + accent()).c_str(),
-                                k + std::string(wc - utf8_len(k), ' ')) +
-                              "  " + c(acol.empty() ? "39" : acol.c_str(), a.empty() ? "    " : a) + "  " +
-                              c("90", n) +
-                              (tally[k].second ? "  " + c(NEW_CHIP, " NEW ") : ""));
-            v.subjects.push_back(k);
-        }
-        if (order.empty()) v.lines.push_back(c("90", "no marks"));
+    if (!subject.empty()) {
+        view::Marks one;
+        for (const auto &r : snap.rows)
+            if (r.klass == subject) one.rows.push_back(r);
+        for (const auto &a : snap.averages)
+            if (std::get<0>(a) == subject) one.averages.push_back(a);
+        v.lines = paint::mark_lines(one, cols);
+        if (v.lines.empty()) v.lines.push_back(c("90", "no marks"));
         return v;
     }
-
-    size_t wm_col = 0, dw = 0;
-    for (const auto &r : snap.rows)
-        if (r.klass == subject) {
-            wm_col = std::max(wm_col, utf8_len(r.mark));
-            if (r.event_at)
-                dw = std::max(dw, utf8_len(paint::date_short(view::ymd_local(r.event_at))));
-        }
-    std::string period;
+    std::vector<std::string> order;
+    std::map<std::string, std::pair<int, int>> tally;  // subject -> {marks, new}
     for (const auto &r : snap.rows) {
-        if (r.klass != subject) continue;
-        if (r.period != period) {
-            if (!period.empty()) v.lines.push_back("");
-            period = r.period;
-            v.lines.push_back(c("1;90", "— " + period + " —"));
-        }
-        std::string d = r.event_at ? paint::date_short(view::ymd_local(r.event_at)) : "";
-        d.append(dw - std::min(dw, utf8_len(d)), ' ');
-        std::string note = plain_cut(r.note, cols > 24 ? cols - 22 : 8);
-        while (!note.empty() && note.back() == ' ') note.pop_back();
-        v.lines.push_back((r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") + c("90", d) + "  " +
-                          c(mark_color(r.mark),
-                            r.mark + std::string(wm_col - utf8_len(r.mark), ' ')) +
-                          "  " + c("39", note));
+        if (!tally.count(r.klass)) order.push_back(r.klass);
+        tally[r.klass].first++;
+        tally[r.klass].second += r.is_new;
     }
-    if (v.lines.empty()) v.lines.push_back(c("90", "no marks"));
-    view::Marks one = view::marks_rows(s, {view::fold(subject)}, 0);
-    for (const auto &[p, a] : one.averages) {
-        v.lines.push_back("");
-        v.lines.push_back(c("1;90", "average " + p) + "  " +
-                          c(paint::avg_color(a), paint::avg_str(a)));
+    std::map<std::string, double> newest;  // averages run oldest period first, so the last wins
+    for (const auto &[k, p, a] : snap.averages) newest[k] = a;
+    size_t wc = 3;
+    for (const auto &k : order) wc = std::max(wc, utf8_len(k));
+    for (const auto &k : order) {
+        auto it = newest.find(k);
+        // a subject whose marks are none of them gradeable averages to N, not to a blank
+        std::string a = it == newest.end() ? "N" : paint::avg_str(it->second);
+        char n[32];
+        snprintf(n, sizeof n, "%d mark%s", tally[k].first, tally[k].first == 1 ? "" : "s");
+        v.lines.push_back(c((std::string("1;") + accent()).c_str(),
+                            k + std::string(wc - utf8_len(k), ' ')) +
+                          "  " +
+                          c(it == newest.end() ? "39" : paint::avg_color(it->second), a) + "  " +
+                          c("90", n) + (tally[k].second ? "  " + c(NEW_CHIP, " NEW ") : ""));
+        v.subjects.push_back(k);
     }
+    if (order.empty()) v.lines.push_back(c("90", "no marks"));
     return v;
-}
-
-std::string mark_key(const view::MarkRow &r) {
-    return r.period + "\t" + r.klass + "\t" + r.mark + "\t" + r.note + "\t" +
-           std::to_string(r.event_at);
-}
-
-// where the grid landed on screen, so a click maps back to a cell
-struct Geom {
-    size_t cw = 0, gut = 3, blk = 1, top = 2, left = 0, nd = 0, nh = 0;
-};
-
-std::vector<std::string> paint_table(const view::Timetable &tt, size_t cd, size_t ch, int rows,
-                                     int cols, Geom &g) {
-    static const char *DAYNAME[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
-    std::vector<std::string> out;
-    g.nd = tt.days.size();
-    g.nh = tt.hours.size();
-    if (!g.nd || !g.nh) {
-        out.push_back(c("90", "week ") + c((std::string("1;") + accent()).c_str(), paint::date_short(tt.monday)) +
-                      c("90", " — no lessons"));
-        return out;
-    }
-    // the widest cell content decides the width; vertical room decides how many lines a cell gets
-    size_t need = 3;
-    for (const Lesson *l : tt.grid) {
-        if (!l) continue;
-        need = std::max(need, utf8_len(l->subject));
-        if (config().flag("table.room")) need = std::max(need, utf8_len(l->room));
-        if (config().flag("table.teacher")) need = std::max(need, utf8_len(l->teacher));
-    }
-    paint::TableLayout L = paint::table_layout(tt, need + 2, (size_t)cols, g.gut);
-    size_t cw = L.cw;
-    size_t head = 2 + L.time_rows;
-    size_t avail = (size_t)rows > head ? (size_t)rows - head : 1;
-    size_t per_day = avail / g.nd;
-    size_t cell_rows = 1;
-    if (L.room && per_day >= 3) cell_rows = 2;
-    if (L.teacher && cell_rows == 2 && per_day >= 4) cell_rows = 3;
-    int tier = (int)cell_rows - 1;
-    g.cw = cw;
-    g.blk = cell_rows + 1;  // the rule under each day belongs to its block
-
-    auto centre = [&](const std::string &t) {
-        size_t n = std::min(cw, utf8_len(t)), l = (cw - n) / 2;
-        return std::string(l, ' ') + plain_cut(t, cw - l);
-    };
-    std::string bar = "│";
-    std::string rule;
-    for (size_t i = 0; i < g.gut; i++) rule += "─";
-    for (size_t h = 0; h < g.nh; h++) {
-        rule += "┼";
-        for (size_t i = 0; i < cw; i++) rule += "─";
-    }
-    rule += "┼";
-
-    std::vector<std::string> hd(head - 1, std::string(g.gut, ' '));
-    for (size_t h = 0; h < g.nh; h++) {
-        hd[0] += c("90", bar) + c("1", centre(tt.hours[h]));
-        for (size_t r = 1; r < hd.size(); r++)
-            hd[r] += c("90", bar) + c("90", centre(r == 1 ? L.t0[h] : L.t1[h]));
-    }
-    out.push_back(c("90", "week ") + c((std::string("1;") + accent()).c_str(), paint::date_short(tt.monday)));
-    for (const auto &h : hd) out.push_back(h + c("90", bar));
-    out.push_back(c("90", rule));
-    g.top = out.size();
-
-    std::string today = view::ymd_local((long long)time(nullptr));
-    for (size_t d = 0; d < g.nd; d++) {
-        struct tm tm {};
-        time_t t = (time_t)classify::epoch(tt.days[d]);
-        gmtime_r(&t, &tm);
-        std::vector<std::string> block(cell_rows);
-        for (size_t r = 0; r < cell_rows; r++)
-            block[r] = r == 0 ? c(tt.days[d] == today ? (std::string("1;") + accent()).c_str()
-                                                      : "90",
-                                  DAYNAME[tm.tm_wday])
-                              : std::string(2, ' ');
-        for (size_t r = 0; r < cell_rows; r++) block[r] += " ";
-        for (size_t h = 0; h < g.nh; h++) {
-            const Lesson *l = tt.at(d, h);
-            std::vector<std::string> txt(cell_rows);
-            if (l) {
-                txt[0] = l->subject;
-                if (cell_rows > 1) txt[1] = l->room;
-                if (cell_rows > 2) txt[2] = l->teacher;
-            }
-            bool cur = d == cd && h == ch;
-            // same states as the cli: cancelled on green, changed on red, both with black text
-            std::string st = !l                ? "90"
-                             : l->state == "x" ? "42;30"
-                             : l->state == "!" ? "41;30"
-                                               : "39";
-            for (size_t r = 0; r < cell_rows; r++) {
-                // the cursor is a bold cell with a trailing star, so it survives a colour-blind
-                // terminal and still shows the state background
-                bool star = cur && r == 0 && cw > 1;
-                size_t avail = star ? cw - 1 : cw;  // the star only limits the text, never shifts it
-                std::string sgr = (cur ? "1;" : "") + (r == 0 || !l ? st : std::string("90"));
-                std::string body = txt[r], room;
-                // one-line cells still carry the room, kept grey next to the subject
-                if (r == 0 && tier == 0 && l && st == "39" && L.room &&
-                    utf8_len(body) + 1 + utf8_len(l->room) <= avail)
-                    room = l->room;
-                size_t n = utf8_len(body) + (room.empty() ? 0 : 1 + utf8_len(room));
-                if (n > avail) {
-                    body = plain_cut(body, avail);
-                    room.clear();
-                    n = avail;
-                }
-                size_t lead = (cw - n) / 2, trail = cw - n - lead - (star ? 1 : 0);
-                block[r] += c("90", bar) + c(sgr.c_str(), std::string(lead, ' ') + body) +
-                            (room.empty() ? "" : c("90", " " + room)) +
-                            c(sgr.c_str(), std::string(trail, ' ') + (star ? "*" : ""));
-            }
-        }
-        for (auto &b : block) out.push_back(b + c("90", bar));
-        out.push_back(c("90", rule));
-    }
-    // more columns than the terminal can hold: cut, never wrap — a wrap shears every row below
-    for (auto &line : out) line = fit(line, (size_t)cols);
-    // centre the block in the pane: the leftover columns split evenly, the leftover rows too
-    size_t used = g.gut + g.nh * (cw + 1) + 1;
-    g.left = (size_t)cols > used ? ((size_t)cols - used) / 2 : 0;
-    size_t pad = (size_t)rows > out.size() ? ((size_t)rows - out.size()) / 2 : 0;
-    if (g.left)
-        for (auto &line : out) line = std::string(g.left, ' ') + line;
-    out.insert(out.begin(), pad, std::string());
-    g.top += pad;
-    return out;
 }
 
 // centred box over the frame; drawn with absolute cursor moves so nothing has to be spliced
@@ -557,13 +274,6 @@ std::string popup(const Lesson &l, int rows, int cols) {
     for (size_t i = 0; i < w + 2; i++) out += c(ac.c_str(), "─");
     out += c(ac.c_str(), "┘");
     return out;
-}
-
-int open_url(const std::string &url) {
-    if (url.empty() || url.find('\'') != std::string::npos) return 1;
-    std::string opener = config().str("general.browser");
-    if (opener.empty()) opener = "xdg-open";
-    return system((opener + " '" + url + "' >/dev/null 2>&1 &").c_str()) == 0 ? 0 : 1;
 }
 
 // paint::term_cols() caps at 100 for pipes; the tui owns the whole screen so it uses the real size
@@ -615,11 +325,11 @@ int selfcheck() {
     tt.rows = {{"bakalari", "2026-08-17", "1", "CJL", "Cestina", "214", "Novak", "", "8:00", "8:45"}};
     tt.grid = {&tt.rows[0], nullptr, nullptr, nullptr};
     {  // widest time form that fits: full span, minutes-only, start over end, then nothing
-        paint::TableLayout w = paint::table_layout(tt, 3, 200, 3);
+        paint::TableLayout wide = paint::table_layout(tt, 3, 200, 3);
         paint::TableLayout m = paint::table_layout(tt, 3, 20, 3);
         paint::TableLayout e = paint::table_layout(tt, 3, 14, 3);
         paint::TableLayout n = paint::table_layout(tt, 3, 11, 3);
-        if (w.t0[0] != "8:00-8:45" || w.cw != 9 || m.t0[0] != "00-45" || m.time_rows != 1 ||
+        if (wide.t0[0] != "8:00-8:45" || wide.cw != 9 || m.t0[0] != "00-45" || m.time_rows != 1 ||
             e.time_rows != 2 || e.t1[0] != "8:45" || n.time_rows) {
             fputs("selfcheck failed: table time forms\n", stderr);
             return 1;
@@ -637,8 +347,8 @@ int selfcheck() {
         }
     }
     Geom big{}, small{};
-    std::vector<std::string> b = paint_table(tt, 0, 0, 40, 200, big);
-    std::vector<std::string> s2 = paint_table(tt, 0, 0, 5, 24, small);
+    std::vector<std::string> b = grid_lines(tt, 0, 0, 40, 200, big);
+    std::vector<std::string> s2 = grid_lines(tt, 0, 0, 5, 24, small);
     // wide terminal: three lines a cell plus a spacer row; cramped: one line, no spacer
     if (big.blk != 4 || small.blk != 2 || b.size() != big.top + 2 * 4 || s2.size() != small.top + 2 * 2) {
         fputs("selfcheck failed: table tiers\n", stderr);
@@ -656,7 +366,7 @@ int selfcheck() {
     // this grid fits any width in the sweep: a cut row means the geometry overran the terminal
     for (int cx = 20; cx <= 200; cx++) {
         Geom g{};
-        for (const auto &line : paint_table(tt, 0, 0, 24, cx, g))
+        for (const auto &line : grid_lines(tt, 0, 0, 24, cx, g))
             if (fit(line, (size_t)cx) != line) {
                 fprintf(stderr, "selfcheck failed: table row overflows %d columns\n", cx);
                 return 1;
@@ -738,12 +448,10 @@ int main(int argc, char **argv) {
         std::vector<size_t> owner;  // flat line -> post index
         std::vector<size_t> start;  // post index -> first flat line
         std::vector<std::string> flat;
-        std::vector<char> bleed;  // flat line -> painted flush left, no gutter
         size_t sel = 0, top = 0, click_post = (size_t)-1;
 
-        view::Marks msnap;  // taken once: marks_rows clears the new-watermark as it reads
-        bool msnap_ok = false;
-        std::map<std::string, std::string> avg_cache;
+        view::Marks msnap;
+        bool msnap_ok = false, marks_seen = false;
         std::string subject;
         MarksView mv;
         size_t msel = 0, mtop = 0;
@@ -784,19 +492,16 @@ int main(int argc, char **argv) {
             if (relayout) {
                 relayout = false;
                 if (mode == M_FEED) {
-                    posts = build(store, (size_t)cols);
+                    posts = feed_posts(view::feed_rows(store, {},
+                                                      (size_t)config().num("general.limit")),
+                                       (size_t)cols - 2, false);
                     flat.clear();
-                    bleed.clear();
                     owner.clear();
                     start.clear();
                     for (size_t p = 0; p < posts.size(); p++) {
                         start.push_back(flat.size());
-                        for (size_t k = 0; k < posts[p].lines.size(); k++) {
-                            bool b = std::find(posts[p].bleed.begin(), posts[p].bleed.end(), k) !=
-                                     posts[p].bleed.end();
-                            bleed.push_back(b);
-                            flat.push_back(b ? posts[p].lines[k]
-                                             : fit(posts[p].lines[k], (size_t)cols - 2));
+                        for (const auto &l : posts[p].lines) {
+                            flat.push_back(fit(l, (size_t)cols - 2));
                             owner.push_back(p);
                         }
                     }
@@ -804,20 +509,13 @@ int main(int argc, char **argv) {
                     first = false;
                 } else if (mode == M_MARKS) {
                     if (!msnap_ok) {
-                        std::vector<std::string> was_new;
-                        for (const auto &r : msnap.rows)
-                            if (r.is_new) was_new.push_back(mark_key(r));
-                        msnap = view::marks_rows(store, {}, 0);
-                        // marks_rows clears the watermark as it reads: keep the chips a live
-                        // reload would otherwise wipe off rows the user has not looked at yet
-                        for (auto &r : msnap.rows)
-                            if (!r.is_new &&
-                                std::find(was_new.begin(), was_new.end(), mark_key(r)) !=
-                                    was_new.end())
-                                r.is_new = true;
+                        // never consumed here: a live reload would wipe the chips off rows the
+                        // user has not looked at yet. the watermark moves on the way out
+                        msnap = view::marks_rows(store, {}, 0, false);
                         msnap_ok = true;
+                        marks_seen = true;
                     }
-                    mv = build_marks(store, msnap, subject, avg_cache, (size_t)cols);
+                    mv = build_marks(msnap, subject, (size_t)cols - 2);
                     if (msel >= mv.lines.size()) msel = mv.lines.empty() ? 0 : mv.lines.size() - 1;
                 } else {
                     if (!tt_ok) {
@@ -864,12 +562,10 @@ int main(int argc, char **argv) {
                     for (int r = 0; r < rows; r++) {
                         size_t li = top + (size_t)r;
                         if (li < flat.size())
-                            out += bleed[li]
-                                       ? flat[li]
-                                       : (owner[li] == sel
-                                              ? (std::string("\033[") + accent() + "m▎\033[0m ")
-                                              : "  ") +
-                                             flat[li];
+                            out += (owner[li] == sel
+                                        ? (std::string("\033[") + accent() + "m▎\033[0m ")
+                                        : "  ") +
+                                   flat[li];
                         out += "\033[K";
                         if (r < rows - 1) out += "\r\n";
                     }
@@ -896,7 +592,7 @@ int main(int argc, char **argv) {
                 }
                 out += "\033[J\r\n";
             } else {
-                tlines = paint_table(tt, cd, chr, rows, cols, geom);
+                tlines = grid_lines(tt, cd, chr, rows, cols, geom);
                 pos = paint::date_short(tt.days.empty() ? tt.monday : tt.days[cd]);
                 for (int r = 0; r < rows; r++) {
                     if ((size_t)r < tlines.size()) out += tlines[(size_t)r];
@@ -946,7 +642,6 @@ int main(int argc, char **argv) {
                 }
                 if (wrote) {  // maild wrote: drop every cached view and re-read
                     msnap_ok = tt_ok = false;
-                    avg_cache.clear();
                     relayout = true;
                 }
                 if (!(pf[0].revents & POLLIN)) continue;  // repaint; the age chip ticks
@@ -1132,6 +827,8 @@ int main(int argc, char **argv) {
             }
             if (quit) break;
         }
+        // the marks tab was open at some point: only now do they count as seen
+        if (marks_seen) view::marks_rows(store, {}, 0);
         return 0;
     } catch (const std::exception &e) {
         leave();

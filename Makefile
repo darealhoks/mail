@@ -1,6 +1,8 @@
 CXX ?= g++
 NAME ?= mail
-CXXFLAGS ?= -std=c++20 -Wall -Wextra -O2
+CXXFLAGS ?= -O2
+CXXFLAGS += -std=c++20 -Wall -Wextra -Wshadow -Wconversion -Wswitch-enum -Wlogical-op \
+            -Wduplicated-cond -Wduplicated-branches -Wnull-dereference
 CPPFLAGS += -DAPP_NAME='"$(NAME)"' -Isrc/core -Isrc/sources -Isrc/view
 DEV ?= 1
 ifeq ($(DEV),1)
@@ -36,10 +38,15 @@ corpus: $(BUILD)/corpus_check
 $(BUILD)/corpus_check: $(BUILD)/src/sources/corpus_check.o $(BUILD)/src/sources/classify.o
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
-check: all
+check: all corpus
 	$(BUILD)/$(NAME)d --selfcheck
 	$(BUILD)/$(NAME)c --selfcheck
 	$(BUILD)/$(NAME)t --selfcheck
+
+check-asan:  # system gcc lacks the sanitize USE flag
+	$(MAKE) clean
+	$(MAKE) check CXX=clang++ CXXFLAGS="-O1 -g -fsanitize=address,undefined -D_GLIBCXX_ASSERTIONS"
+	$(MAKE) clean
 
 install: all
 	install -Dm755 $(BUILD)/$(NAME)d $(BUILD)/$(NAME)c $(BUILD)/$(NAME)t -t $(DESTDIR)$(PREFIX)/bin
@@ -52,4 +59,4 @@ clean:
 
 -include $(COMMON_OBJ:.o=.d) $(BUILD)/src/maild/main.d $(BUILD)/src/cli/cli.d $(BUILD)/src/tui/tui.d
 
-.PHONY: all corpus check install uninstall clean
+.PHONY: all corpus check check-asan install uninstall clean

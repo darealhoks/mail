@@ -13,7 +13,7 @@ struct Config {
     std::string str(const std::string &key) const;
     int num(const std::string &key) const;
     bool flag(const std::string &key) const;
-    std::vector<std::string> list(const std::string &key) const;  // comma list, lowercased
+    const std::vector<std::string> &list(const std::string &key) const;  // comma list, lowercased
     void set(const std::string &key, const std::string &val) { v[key] = val; }
 };
 

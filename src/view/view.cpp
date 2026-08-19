@@ -93,13 +93,15 @@ long long local_at(const std::string &date, const std::string &hm) {
     return t == (time_t)-1 ? 0 : (long long)t;
 }
 
+std::string rel_span(long long secs) {
+    if (secs < 90) return std::to_string(secs) + "s";
+    if (secs < 5400) return std::to_string(secs / 60) + "m";
+    if (secs < 172800) return std::to_string(secs / 3600) + "h";
+    return std::to_string(secs / 86400) + "d";
+}
+
 std::string ago(long long t) {
-    if (!t) return "never";
-    long long d = (long long)time(nullptr) - t;
-    if (d < 90) return std::to_string(d) + "s ago";
-    if (d < 5400) return std::to_string(d / 60) + "m ago";
-    if (d < 172800) return std::to_string(d / 3600) + "h ago";
-    return std::to_string(d / 86400) + "d ago";
+    return t ? rel_span((long long)time(nullptr) - t) + " ago" : "never";
 }
 
 std::string dur(long long s) {
@@ -124,29 +126,36 @@ double mark_value(const std::string &t) {
 
 Feed feed_rows(Store &s, const std::vector<std::string> &filters, size_t limit) {
     Feed f;
-    f.items = s.feed();
     // blacklisted classes drop out before numbering, so `d 4` and `o 4` stay contiguous
-    f.items.erase(std::remove_if(f.items.begin(), f.items.end(),
-                                 [](const Item &i) { return blacklisted(i.klass, abbrev(i.klass)); }),
-                  f.items.end());
+    std::vector<std::string> ab, fk, fc, fs;  // abbrev and the folded match keys, per item
     std::vector<std::string> known;
     auto add = [&](std::vector<std::string> &v, const std::string &t) {
         if (std::find(v.begin(), v.end(), t) == v.end()) v.push_back(t);
         if (std::find(known.begin(), known.end(), t) == known.end()) known.push_back(t);
+        return t;
     };
-    for (const auto &i : f.items) {
-        add(f.kinds, fold(i.kind));
-        add(f.classes, fold(abbrev(i.klass)));
-        add(f.sources, fold(i.source));
+    for (auto &i : s.feed()) {
+        std::string a = abbrev(i.klass);
+        if (blacklisted(i.klass, a)) continue;
+        fk.push_back(add(f.kinds, fold(i.kind)));
+        fc.push_back(add(f.classes, fold(a)));
+        fs.push_back(add(f.sources, fold(i.source)));
+        ab.push_back(std::move(a));
+        f.items.push_back(std::move(i));
     }
     for (const auto &w : filters)
         if (std::find(known.begin(), known.end(), w) == known.end()) {
             f.bad_filter = w;  // nothing is read or written past here
             return f;
         }
+    auto hit = [&](size_t n) {
+        for (const auto &w : filters)
+            if (w != fk[n] && w != fc[n] && w != fs[n]) return false;
+        return true;
+    };
 
     size_t shown = 0;
-    for (const auto &i : f.items) shown += matches(i, filters);
+    for (size_t n = 0; n < f.items.size(); n++) shown += hit(n);
     if (!shown) return f;
 
     long long wm = watermark(s, "seen_feed");
@@ -156,51 +165,56 @@ Feed feed_rows(Store &s, const std::vector<std::string> &filters, size_t limit) 
     size_t skip = limit && shown > limit ? shown - limit : 0;
     for (size_t n = 0; n < f.items.size(); n++) {
         const Item &i = f.items[n];
-        if (!matches(i, filters)) continue;
+        if (!hit(n)) continue;
         if (skip) {
             skip--;
             continue;
         }
         f.rows.push_back({n + 1, i.id > wm,
-                          !i.due_at ? 0 : i.due_at >= time(nullptr) ? 1 : 2, abbrev(i.klass)});
+                          !i.due_at ? 0 : i.due_at >= time(nullptr) ? 1 : 2, ab[n]});
     }
     return f;
 }
 
-Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit) {
+Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit,
+                 bool consume_new) {
     Marks out;
     std::vector<Item> all = s.marks();
     std::vector<Item> items;
+    std::vector<std::string> ab;
     for (auto &i : all) {
-        std::string cl = fold(abbrev(i.klass));
-        if (!filters.empty() && std::find(filters.begin(), filters.end(), cl) == filters.end())
-            continue;
-        if (filters.empty() && blacklisted(i.klass, abbrev(i.klass))) continue;
+        std::string a = abbrev(i.klass);
+        if (!filters.empty()) {
+            if (std::find(filters.begin(), filters.end(), fold(a)) == filters.end()) continue;
+        } else if (blacklisted(i.klass, a)) continue;
+        ab.push_back(std::move(a));
         items.push_back(std::move(i));
     }
     // averages come from every mark of the subject, not just the ones the limit leaves visible
-    std::map<std::string, std::pair<double, double>> avg;  // half-year -> {sum(w*v), sum(w)}
-    if (!filters.empty())
-        for (const auto &i : items) {
-            double v = mark_value(i.title.substr(0, i.title.find(' ')));
-            if (v <= 0) continue;
-            std::string p = period_label(i.event_at ? i.event_at : i.fetched_at);
-            avg[p].first += i.weight * v;
-            avg[p].second += i.weight;
-        }
-    for (const auto &[p, a] : avg) out.averages.push_back({p, a.first / a.second});
+    std::map<std::string, std::map<std::string, std::pair<double, double>>> acc;
+    for (size_t n = 0; n < items.size(); n++) {
+        const Item &i = items[n];
+        double v = mark_value(i.title.substr(0, i.title.find(' ')));
+        if (v <= 0) continue;
+        auto &a = acc[ab[n]][period_label(i.event_at ? i.event_at : i.fetched_at)];
+        a.first += i.weight * v;
+        a.second += i.weight;
+    }
+    for (const auto &[k, per] : acc)
+        for (const auto &[p, a] : per) out.averages.push_back({k, p, a.first / a.second});
 
     if (limit && items.size() > limit) items.resize(limit);  // newest first, so the head is the cap
 
     long long wm = watermark(s, "seen_marks");
-    set_watermark(s, "seen_marks", all);
+    if (consume_new) set_watermark(s, "seen_marks", all);
 
-    for (const auto &i : items) {
+    for (size_t n = 0; n < items.size(); n++) {
+        const Item &i = items[n];
         MarkRow r;
         r.is_new = i.id > wm;
         r.event_at = i.event_at;
         r.period = period_label(i.event_at ? i.event_at : i.fetched_at);
-        r.klass = abbrev(i.klass);
+        r.klass = ab[n];
         r.mark = i.title.substr(0, i.title.find(' '));
         std::string caption = trim(i.title.substr(r.mark.size())), body = trim(i.body);
         r.note = caption + (body.empty() ? "" : (caption.empty() ? "" : " — ") + body);
@@ -322,13 +336,11 @@ std::vector<Gripe> gripes(Store &s) {
 
 NewCounts new_counts(Store &s) {
     NewCounts n;
-    long long fw = watermark(s, "seen_feed"), mw = watermark(s, "seen_marks");
-    for (const auto &i : s.feed()) {
-        if (i.id <= fw || blacklisted(i.klass, abbrev(i.klass))) continue;
-        (i.kind == "task" || i.kind == "test" ? n.work : n.msgs)++;
-    }
-    for (const auto &i : s.marks())
-        if (i.id > mw && !blacklisted(i.klass, abbrev(i.klass))) n.marks++;
+    for (const auto &i : s.feed(watermark(s, "seen_feed")))
+        if (!blacklisted(i.klass, abbrev(i.klass)))
+            (i.kind == "task" || i.kind == "test" ? n.work : n.msgs)++;
+    for (const auto &i : s.marks(watermark(s, "seen_marks")))
+        if (!blacklisted(i.klass, abbrev(i.klass))) n.marks++;
     for (const Source &src : sources())
         if (!src.session_error().empty()) n.unsigned_pretty.push_back(src.pretty);
     return n;

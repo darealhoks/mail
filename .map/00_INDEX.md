@@ -11,7 +11,7 @@
     src/core/     store config creds json http oauth notify term   — no source, no ui
     src/sources/  bakalari teams teams_auth classify + registry.h  — one pair per source
     src/view/     store -> row structs, pure: no printf, no ansi, no term width
-                  + paint.cpp: wrap/width/sgr helpers shared by cli and tui
+                  + paint.cpp: the renderers themselves — feed posts, marks rows, timetable grid, sgr helpers
     src/maild/    main.cpp     oneshot fetch + notify; run from cron: */15 * * * * maild
     src/cli/      cli.cpp      argv, binds, layout, paint
     src/tui/      tui.cpp      raw-mode feed/marks/timetable, tab strip, keys + mouse, no flags

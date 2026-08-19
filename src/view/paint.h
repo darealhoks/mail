@@ -43,6 +43,34 @@ struct TableLayout {
 // content plus the times actually need, nor what `cols` can hold
 TableLayout table_layout(const view::Timetable &tt, size_t need, size_t cols, size_t gut);
 
+// truncate a painted line to `width` visible columns, skipping the sgr escapes
+std::string fit(const std::string &l, size_t width);
+// "09:55" -> "9:55"
+std::string hhmm(const std::string &t);
+// general.browser (xdg-open by default), detached; 1 if the url is empty or unquotable
+int open_url(const std::string &url);
+
+// one painted feed post: terminal rows, sgr included, ending in a blank line
+struct Post {
+    std::vector<std::string> lines;
+    std::string url;
+};
+// numbered: prefix each post with its feed position, the number `dismiss`/`open` take
+std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered);
+// period headers, the mark rows, then the averages; the class column appears only when the
+// rows hold more than one class
+std::vector<std::string> mark_lines(const view::Marks &m, size_t width);
+
+// where the grid landed on screen, so a click maps back to a cell
+struct Geom {
+    size_t cw = 0, gut = 3, blk = 1, top = 2, left = 0, nd = 0, nh = 0;
+};
+inline const size_t NO_CELL = (size_t)-1;  // grid_lines: no cursor cell
+// rows > 0 fills that many terminal rows: taller cells, the block centred in the pane.
+// rows <= 0 gives one line per cell and no padding, for a listing that just scrolls past
+std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t ch, int rows,
+                                    int cols, Geom &g);
+
 inline const char *NEW_CHIP = "1;7;31";  // reverse: red block, text in the terminal bg
 
 }  // namespace paint

@@ -189,10 +189,17 @@ bool Config::flag(const std::string &key) const {
     return l == "1" || l == "yes" || l == "on" || l == "true";
 }
 
-std::vector<std::string> Config::list(const std::string &key) const {
-    std::vector<std::string> out = split(str(key), ',');
-    for (auto &e : out) e = lower(e);
-    return out;
+const std::vector<std::string> &Config::list(const std::string &key) const {
+    // memoised on the raw value: blacklisted() and the points tables run per item, per render
+    static std::map<std::string, std::pair<std::string, std::vector<std::string>>> memo;
+    std::string raw = str(key);
+    auto it = memo.find(key);
+    if (it == memo.end() || it->second.first != raw) {
+        std::vector<std::string> out = split(raw, ',');
+        for (auto &e : out) e = lower(e);
+        it = memo.insert_or_assign(key, std::make_pair(raw, std::move(out))).first;
+    }
+    return it->second.second;
 }
 
 std::string config_path() {

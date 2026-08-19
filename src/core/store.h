@@ -67,9 +67,10 @@ struct Store {
     void clear_state(const std::string &like);
 
     // everything the frontend shows: not dismissed, marks excluded (own section, later)
-    std::vector<Item> feed();
+    // since>0 reads only the ids above it: the "what's new" counters skip the full scan
+    std::vector<Item> feed(long long since = 0);
     // kind='mark' only, newest first
-    std::vector<Item> marks();
+    std::vector<Item> marks(long long since = 0);
     void dismiss(const std::vector<long long> &ids);
 
     sqlite3 *db = nullptr;

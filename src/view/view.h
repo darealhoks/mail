@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "registry.h"
@@ -30,6 +31,8 @@ std::string ymd_plus(const std::string &date, int days);
 // "YYYY-MM-DD" + "H:MM" in local time; 0 if either is malformed
 long long local_at(const std::string &date, const std::string &hm);
 
+// 90s / 25m / 4h / 3d: one ladder behind every "how long ago" and "in how long" in the ui
+std::string rel_span(long long secs);
 std::string ago(long long t);
 std::string dur(long long s);
 
@@ -62,10 +65,13 @@ struct MarkRow {
 
 struct Marks {
     std::vector<MarkRow> rows;
-    std::vector<std::pair<std::string, double>> averages;  // half-year label -> weighted mean
+    // {class abbrev, half-year label, weighted mean}, class-major, oldest period first
+    std::vector<std::tuple<std::string, std::string, double>> averages;
 };
-// filters must already be folded; with none, the blacklist applies and no average is computed
-Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit);
+// filters must already be folded; with none, the blacklist applies. consume_new=false leaves
+// the seen-marks watermark alone, so a live view can re-read without wiping its own chips
+Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit,
+                 bool consume_new = true);
 
 struct Timetable {
     std::string monday;
