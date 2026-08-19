@@ -18,7 +18,7 @@
 
 `make` builds all three binaries from `src/core src/sources src/view` plus one main each.
 `make check` runs the two `--selfcheck`s; `make corpus` scores the classifier against
-`analysis/gold.tsv`.
+`tests/gold.tsv`.
 
 ## cli verbs
 

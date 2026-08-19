@@ -1,4 +1,4 @@
-// scores classify against the gitignored analysis/ corpus; built by `make corpus`, not by `all`
+// scores classify against the tests/ corpus; built by `make corpus`, not by `all`
 #include <cstdio>
 #include <fstream>
 #include <map>
@@ -22,9 +22,9 @@ std::vector<std::string> split_tab(const std::string &l) {
 }  // namespace
 
 int main() {
-    std::ifstream gf("analysis/gold.tsv"), cf("analysis/corpus.tsv");
+    std::ifstream gf("tests/gold.tsv"), cf("tests/corpus.tsv");
     if (!gf || !cf) {
-        fputs("corpus: analysis/gold.tsv or analysis/corpus.tsv missing\n", stderr);
+        fputs("corpus: tests/gold.tsv or tests/corpus.tsv missing\n", stderr);
         return 2;
     }
     std::map<std::string, std::string> gold;

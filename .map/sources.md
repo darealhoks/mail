@@ -55,8 +55,8 @@ no status line, no gripe, no sign-in prompt.
   the corpus it was tuned on; teams::plain_text mirrors clean.py's plain()
 - classifier is plain substring scanning, no <regex>: rules are stem+suffix and fixed
   phrases, and <regex> costs more RSS than the whole daemon budget
-- `make corpus` runs it over analysis/corpus.tsv against gold.tsv (406/406 gold, 239/280
-  deadlines, byte-identical to analysis/classify.py); skips when analysis/ is absent
+- `make corpus` runs it over tests/corpus.tsv against gold.tsv (406/406 gold, 239/280
+  deadlines, byte-identical to analysis/classify.py); scrubbed of personal data
 - task posts carry only title + due in the adaptive card; the instructions text lives on
   the education assignment (id sits in the card's Action.OpenUrl context) and is unreachable —
   /education/classes/*/assignments/* is 403 under both first-party clients we can use
