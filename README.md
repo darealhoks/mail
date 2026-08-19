@@ -1,7 +1,7 @@
 # mail
 
-Read-only aggregator for school systems. `maild` fetches Bakaláři and MS Teams on a
-timer into a local sqlite db; `mailc` prints from that db.
+Read-only aggregator for school systems. `maild` fetches Bakaláři and MS Teams from cron
+into a local sqlite db; `mailc` prints from that db.
 
 Everything is local. No server, no cloud, no AI.
 
@@ -24,7 +24,7 @@ under another name (binaries, config dir, data dir).
 ## Use
 
     maild                        # fetch once
-    maild --daemon --interval=900   # keep fetching
+    */15 * * * * maild           # crontab: keep fetching
     mailc                        # the feed, nearest deadline first
     mailc <word>                 # filter it
     mailc marks                  # marks by quarter
@@ -43,7 +43,7 @@ defaults on first run), then `mailc auth`.
     src/core/     store config creds http oauth json notify
     src/sources/  bakalari teams classify + registry
     src/view/     store rows -> render structs
-    src/maild/    fetch loop, timers, notify
+    src/maild/    oneshot fetch, notify
     src/cli/      argv, layout, colors
 
 One sqlite db (`~/.local/share/mail/mail.db`) is the only interface between them.

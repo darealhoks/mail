@@ -34,6 +34,11 @@ struct Store {
     Store(const Store &) = delete;
     Store &operator=(const Store &) = delete;
 
+    // one fetch+insert per source is atomic; put_lessons nests inside via SAVEPOINT
+    void begin();
+    void commit();
+    void rollback();
+
     // returns true if the item was new ((source, src_uid) not already stored)
     bool insert_item(const Item &i);
     void log_fetch(const std::string &source, long long started_at, bool ok,

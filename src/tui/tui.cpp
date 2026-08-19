@@ -272,9 +272,7 @@ void auth_all() {
     enter();
 }
 
-// summon maild: nudge a running daemon, else run a one-shot fetch in the background
 std::string refresh() {
-    if (system("pkill -USR1 -x " APP_NAME "d >/dev/null 2>&1") == 0) return "refreshing";
     return system(APP_NAME "d >/dev/null 2>&1 &") == 0 ? "fetching" : "refresh failed";
 }
 

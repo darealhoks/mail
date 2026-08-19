@@ -1,7 +1,9 @@
 # sources
 
 Contract: one file pair per source. fetch(Store &) -> vector<Item>; throws on any
-protocol/shape error (daemon logs to fetch_log, never crashes the loop).
+protocol/shape error (maild logs it to fetch_log and moves to the next source).
+Fetch+insert per source runs in one transaction: a throw mid-fetch rolls back, so a
+source's own cursor advance can never outlive the items it covers.
 
 Registry: `src/sources/registry.h` — `Source{name, pretty, have_session, session_error,
 fetch, login}` and `sources()`, the built-in list filtered by `[source.<name>] enabled`.

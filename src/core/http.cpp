@@ -6,9 +6,19 @@
 
 namespace {
 
+const size_t MAX_BODY = 32u << 20;
+
+// a c callback: no exception may cross it, and a short return aborts the transfer
 size_t sink(char *ptr, size_t size, size_t nmemb, void *ud) {
-    static_cast<std::string *>(ud)->append(ptr, size * nmemb);
-    return size * nmemb;
+    size_t n = size * nmemb;
+    auto *b = static_cast<std::string *>(ud);
+    if (b->size() + n > MAX_BODY) return 0;
+    try {
+        b->append(ptr, n);
+    } catch (...) {
+        return 0;
+    }
+    return n;
 }
 
 struct Curl {
@@ -22,7 +32,9 @@ struct Curl {
 HttpResponse perform(CURL *h, std::string &body) {
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, sink);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &body);
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(h, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    curl_easy_setopt(h, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(h, CURLOPT_USERAGENT, APP_NAME "/0.1");
     CURLcode rc = curl_easy_perform(h);
@@ -56,13 +68,13 @@ HttpResponse http_post_form(const std::string &url, const std::string &body,
     curl_easy_setopt(c.h, CURLOPT_URL, url.c_str());
     curl_easy_setopt(c.h, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(c.h, CURLOPT_POSTFIELDSIZE, (long)body.size());
-    curl_easy_setopt(c.h, CURLOPT_POSTREDIR, (long)CURL_REDIR_POST_ALL);  // else a 301 turns the post into a get
     return with_headers(c.h, headers);
 }
 
 HttpResponse http_get(const std::string &url, const std::vector<std::string> &headers) {
     Curl c;
     curl_easy_setopt(c.h, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c.h, CURLOPT_FOLLOWLOCATION, 1L);  // posts never follow: a 302 would re-send creds
     return with_headers(c.h, headers);
 }
 

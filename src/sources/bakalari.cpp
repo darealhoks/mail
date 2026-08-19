@@ -25,7 +25,10 @@ const char *CREDS = "bakalari";
 std::string base() {
     std::string u = config().str("source.bakalari.url");
     // creds must not go out over the plaintext first hop curl would guess
-    if (!u.empty() && u.compare(0, 4, "http") != 0) u = "https://" + u;
+    if (u.empty()) return u;
+    if (u.compare(0, 8, "https://") == 0) return u;
+    if (u.compare(0, 7, "http://") == 0) throw std::runtime_error("bakalari: url must be https");
+    u = "https://" + u;
     return u;
 }
 
@@ -177,8 +180,8 @@ std::vector<Item> fetch(Store &store) {
                           + " " + s(m, "Caption");
                 i.body = s(m, "Theme");
                 i.event_at = classify::epoch(s(m, "MarkDate"));
-                i.weight = atoi(s(m, "Weight").c_str());
-                if (i.weight < 1) i.weight = 1;
+                long w = strtol(s(m, "Weight").c_str(), nullptr, 10);
+                i.weight = (int)std::clamp(w, 1L, 100L);
                 i.src_uid = "mark:" + id;
                 out.push_back(std::move(i));
             }

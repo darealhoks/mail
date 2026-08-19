@@ -1,12 +1,12 @@
 # auth ux (teams device-code)
 
-Refresh token lifetime is not queryable; it dies from ~90d inactivity (daemon's
+Refresh token lifetime is not queryable; it dies from ~90d inactivity (cron's
 constant refreshing prevents that) or unpredictable revocation (password change,
 admin, CA policy). No advance warning possible; detection = refresh returns
 invalid_grant on a fetch cycle.
 
 On session death:
-- daemon: urgent notify "Teams session expired" + resign command; source marked
+- maild: urgent notify "Teams session expired" + resign command; source marked
   failed/stale everywhere until re-auth
 - `mailc auth teams`: runs device-code flow, prints link + user code + QR code
   rendered in terminal (qr the verification message)

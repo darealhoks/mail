@@ -23,8 +23,6 @@ bool config_save(const std::string &key, const std::string &val);
 
 // parsed once; writes a commented default file if none exists
 Config &config();
-// re-reads the file; the daemon calls it each cycle so config edits apply without a restart
-void config_reload();
 
 // "25/26" for any instant; the school year rolls on 1 August
 std::string school_year(long long t);

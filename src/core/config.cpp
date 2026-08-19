@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "json.h"
 #include "store.h"
 #include "term.h"
 
@@ -35,6 +36,7 @@ const struct Default {
     {"general.blacklist", "anj", true},
     {"general.years", "auto", true},
     {"general.stale_warn", "yes", true},
+    {"general.interval", "900", true},  // must match the crontab period; only feeds staleness
     {"general.raw_names", "no", true},
     {"general.date", "%-d. %-m.", true},  // strftime; the year is appended when it differs
     {"general.marks_newest_last", "yes", true},
@@ -117,10 +119,8 @@ std::string seed_file() {
     return o;
 }
 
-// keys before any header land in [general]: that is exactly what a pre-sections file meant
 void parse(std::istream &f, Config &c, bool quiet = false) {
-    std::string section = "general", l;
-    bool warned = false;
+    std::string section, l;
     while (std::getline(f, l)) {
         std::string t = trim(l);
         if (t.empty() || t[0] == '#') continue;
@@ -131,7 +131,6 @@ void parse(std::istream &f, Config &c, bool quiet = false) {
                 continue;
             }
             section = lower(trim(t.substr(1, e - 1)));
-            warned = true;  // a header seen means the file is not a legacy flat one
             continue;
         }
         size_t eq = t.find('=');
@@ -139,9 +138,9 @@ void parse(std::istream &f, Config &c, bool quiet = false) {
             if (!quiet) warn("ignoring line without '=': " + t);
             continue;
         }
-        if (!warned) {
-            warned = true;
-            if (!quiet) warn("no [section] header, reading as [general]");
+        if (section.empty()) {
+            if (!quiet) warn("ignoring line before any [section]: " + t);
+            continue;
         }
         std::string k = section + "." + lower(trim(t.substr(0, eq))), v = trim(t.substr(eq + 1));
         if (!quiet && !known(k)) warn("unknown key '" + k + "'");
@@ -248,12 +247,6 @@ Config &config() {
     return c;
 }
 
-void config_reload() {
-    Config &c = config();
-    c.v.clear();
-    load(c);
-}
-
 std::string school_year(long long t) {
     struct tm tm {};
     time_t tt = (time_t)t;
@@ -337,10 +330,12 @@ int config_check() {
         !c.str("general.missing").empty())
         return 1;
 
-    Config legacy;  // pre-sections file: bare keys must still land in [general]
-    std::istringstream lin("limit = 3\nnotify = x\n");
-    parse(lin, legacy, true);
-    if (legacy.num("general.limit") != 3 || legacy.str("general.notify") != "x") return 1;
+    Config head;  // keys before any header are dropped, not filed under [general]
+    std::istringstream lin("limit = 3\n[general]\nnotify = x\n");
+    parse(lin, head, true);
+    if (head.num("general.limit") != 0 || head.str("general.notify") != "x") return 1;
+
+    if (html_unescape("&#xD800;a&#65;") != "&#xD800;aA") return 1;  // lone surrogate stays literal
 
     if (points_mark(95) != 1 || points_mark(80) != 2 || points_mark(10) != 5) return 1;
     if (mark_scale() != std::pair<char, char>{'1', '5'}) return 1;

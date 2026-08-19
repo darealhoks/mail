@@ -6,9 +6,7 @@
 #include <fstream>
 #include <vector>
 
-#include <csignal>
 #include <ctime>
-#include <malloc.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -123,6 +121,15 @@ int selfcheck() {
     }
     remove(tmp.c_str());
 
+    {
+        Store s(tmp);
+        Item i = item("teams");
+        i.title = "a\x1b[31mb";
+        CHECK(s.insert_item(i));
+        CHECK(s.feed().at(0).title == "a[31mb");
+    }
+    remove(tmp.c_str());
+
     CHECK(teams::plain_text("<p>a<br/>b</p><div>c &amp;amp; d</div>") == "a\nb\nc & d");
     CHECK(teams::plain_text("see https://x.y/z now") == "see https://x.y/z now");
     CHECK(teams::plain_text("<a href=\"https://x.y/z\">https://x.y/z</a>.") == "https://x.y/z .");
@@ -169,16 +176,25 @@ int fetch_all(bool cold_flag) {
         fprintf(stderr, "\rteams: %zu/%zu  %-30.30s", done, total, what.c_str());
         if (done == total) fputs("\r\033[K", stderr);
     };
+    store.set_state("daemon.interval", config().str("general.interval"));
     auto run = [&](const char *name, auto &&fn) {
         long long started = (long long)time(nullptr);
         bool cold = cold_flag || store.last_ok_fetch(name) == 0;
         try {
             int fresh = 0;
-            for (const auto &i : fn())
-                if (store.insert_item(i)) {
-                    fresh++;
-                    if (!cold) fresh_kinds[i.kind]++;
-                }
+            // a source that advances its own cursor mid-fetch must not outlive the inserts
+            store.begin();
+            try {
+                for (const auto &i : fn())
+                    if (store.insert_item(i)) {
+                        fresh++;
+                        if (!cold) fresh_kinds[i.kind]++;
+                    }
+            } catch (...) {
+                store.rollback();
+                throw;
+            }
+            store.commit();
             store.log_fetch(name, started, true, "", cold ? 0 : fresh);
             store.set_state(std::string("expired.") + name, "");
             if (cold) {
@@ -213,58 +229,21 @@ int fetch_all(bool cold_flag) {
     return rc;
 }
 
-volatile sig_atomic_t quit = 0, wake = 0;
-void on_quit(int) { quit = 1; }
-void on_wake(int) { wake = 1; }
-
-// fetch now, then every interval; SIGUSR1 fetches early, SIGTERM/SIGINT exits
-int daemon_loop(bool cold, unsigned interval) {
-    struct sigaction sa {};
-    sa.sa_handler = on_quit;
-    sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGINT, &sa, nullptr);
-    sa.sa_handler = on_wake;
-    sigaction(SIGUSR1, &sa, nullptr);
-
-    Store().set_state("daemon.interval", std::to_string(interval));  // mailc's staleness threshold
-
-    int rc = fetch_all(cold);
-    while (!quit) {
-        malloc_trim(0);  // hand the fetch's heap back so idle RSS stays flat
-        unsigned left = interval;
-        while (left && !quit && !wake) left = sleep(left);
-        if (quit) break;
-        wake = 0;
-        config_reload();
-        rc = fetch_all(false);
-    }
-    return rc;
-}
-
 }  // namespace
 
 int main(int argc, char **argv) {
     try {
-        setvbuf(stdout, nullptr, _IOLBF, 0);  // stdout is a log pipe under a supervisor
-        bool cold = false, loop = false;
-        unsigned interval = 900;
+        setvbuf(stdout, nullptr, _IOLBF, 0);  // stdout is a log pipe under cron
+        bool cold = false;
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--selfcheck")) return selfcheck();
             else if (!strcmp(argv[i], "--cold")) cold = true;
-            else if (!strcmp(argv[i], "--daemon")) loop = true;
-            else if (!strncmp(argv[i], "--interval=", 11)) {
-                interval = (unsigned)atoi(argv[i] + 11);
-                loop = true;
-                if (!interval) {
-                    fprintf(stderr, APP_NAME "d: interval must be > 0\n");
-                    return 2;
-                }
-            } else {
-                fprintf(stderr, "usage: " APP_NAME "d [--cold] [--daemon] [--interval=SECONDS]\n");
+            else {
+                fprintf(stderr, "usage: " APP_NAME "d [--cold]\n");
                 return 2;
             }
         }
-        return loop ? daemon_loop(cold, interval) : fetch_all(cold);
+        return fetch_all(cold);
     } catch (const std::exception &e) {
         fprintf(stderr, APP_NAME "d: %s\n", e.what());
         return 1;

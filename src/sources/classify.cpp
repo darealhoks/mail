@@ -285,9 +285,13 @@ long long epoch(const std::string &iso) {
     struct tm tm {};
     if (iso.size() < 10 || !strptime(iso.substr(0, 10).c_str(), "%Y-%m-%d", &tm)) return 0;
     long long t = (long long)timegm(&tm);
-    if (iso.size() >= 16 && iso[10] == 'T')
-        t += strtoll(iso.c_str() + 11, nullptr, 10) * 3600 +
-             strtoll(iso.c_str() + 14, nullptr, 10) * 60;
+    if (t < -62135596800LL || t > 253402300799LL) return 0;  // year 1..9999
+    if (iso.size() >= 16 && iso[10] == 'T') {
+        long long h = strtoll(iso.c_str() + 11, nullptr, 10);
+        long long mi = strtoll(iso.c_str() + 14, nullptr, 10);
+        if (h < 0 || h > 23 || mi < 0 || mi > 59) return t;
+        t += h * 3600 + mi * 60;
+    }
     return t;
 }
 

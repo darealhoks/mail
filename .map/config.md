@@ -12,7 +12,8 @@ pre-sections file keeps working; nothing is dropped.
     links      no    print the item url line
     blacklist  anj   comma list; matched against the class abbrev and the raw class name
     years      auto  school years to scrape; auto = current one. list form: 25/26, 26/27
-    stale_warn yes   warn when the store is older than the daemon's poll rate
+    stale_warn yes   warn when the store is older than the fetch period
+    interval   900   seconds; must match the crontab period, only feeds the staleness check
     marks_newest_last yes  marks oldest first, so the newest sit by the prompt; no = newest first
     notify           notification exec hook, empty = silent
     browser          opener for `mailc open`, default xdg-open
@@ -111,7 +112,7 @@ Fired by maild only: one grouped "You've got mail" (urgency 0, icon f0e0) per fe
 (urgency 2, icon f023) per outage, gated by state key `expired.<source>` which the next
 successful fetch of that source clears. Cold runs never notify.
 
-Staleness is never notified: `mailc` sees it by itself and prints it. The daemon publishes
-its `--interval` to state key `daemon.interval` on startup; anything older than 2x that is a
-yellow warning (one skipped tick is jitter), falling back to 6h when no daemon ever ran.
-A failed fetch stays a red error. `stale_warn = no` silences the warning for cron users.
+Staleness is never notified: `mailc` sees it by itself and prints it. Each `maild` run
+publishes `general.interval` to state key `daemon.interval`; anything older than 2x that is a
+yellow warning (one skipped tick is jitter), falling back to 6h when maild never ran.
+A failed fetch stays a red error. `stale_warn = no` silences the warning.

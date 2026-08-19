@@ -67,6 +67,15 @@ void bind(sqlite3_stmt *s, int i, const std::string &v) {
     sqlite3_bind_text(s, i, v.data(), (int)v.size(), SQLITE_TRANSIENT);
 }
 
+// human-visible columns only: set_state values carry a \x1f-delimited blob
+std::string safe(const std::string &v) {
+    std::string o;
+    o.reserve(v.size());
+    for (char c : v)
+        if ((unsigned char)c >= 0x20 || c == '\n' || c == '\t') o += c;
+    return o;
+}
+
 }  // namespace
 
 std::string data_dir() {
@@ -106,6 +115,10 @@ Store::Store(const std::string &path) {
 
 Store::~Store() { sqlite3_close(db); }
 
+void Store::begin() { exec(db, "BEGIN IMMEDIATE"); }
+void Store::commit() { exec(db, "COMMIT"); }
+void Store::rollback() { sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr); }
+
 bool Store::insert_item(const Item &i) {
     sqlite3_stmt *s = nullptr;
     const char *sql =
@@ -114,14 +127,14 @@ bool Store::insert_item(const Item &i) {
     if (sqlite3_prepare_v2(db, sql, -1, &s, nullptr) != SQLITE_OK)
         throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
     bind(s, 1, i.source);
-    bind(s, 2, i.klass);
+    bind(s, 2, safe(i.klass));
     bind(s, 3, i.kind);
-    bind(s, 4, i.title);
-    bind(s, 5, i.body);
+    bind(s, 4, safe(i.title));
+    bind(s, 5, safe(i.body));
     i.due_at ? sqlite3_bind_int64(s, 6, i.due_at) : sqlite3_bind_null(s, 6);
     i.event_at ? sqlite3_bind_int64(s, 7, i.event_at) : sqlite3_bind_null(s, 7);
     bind(s, 8, i.src_uid);
-    bind(s, 9, i.url);
+    bind(s, 9, safe(i.url));
     sqlite3_bind_int(s, 10, i.weight);
     int rc = sqlite3_step(s);
     sqlite3_finalize(s);
@@ -130,17 +143,23 @@ bool Store::insert_item(const Item &i) {
     // a known item still gets its text refreshed: upstream edits show up, and rows stored by
     // an older build (no url, undecoded entities) heal on the next fetch. not "new" either way.
     sqlite3_stmt *u = nullptr;
-    const char *up = "UPDATE items SET title=?,body=?,url=?,weight=? WHERE source=? AND src_uid=?";
-    if (sqlite3_prepare_v2(db, up, -1, &u, nullptr) == SQLITE_OK) {
-        bind(u, 1, i.title);
-        bind(u, 2, i.body);
-        bind(u, 3, i.url);
-        sqlite3_bind_int(u, 4, i.weight);
-        bind(u, 5, i.source);
-        bind(u, 6, i.src_uid);
-        sqlite3_step(u);
-        sqlite3_finalize(u);
-    }
+    const char *up = "UPDATE items SET title=?,body=?,url=?,weight=?,kind=?,class=?,due_at=?,"
+                     "event_at=? WHERE source=? AND src_uid=?";
+    if (sqlite3_prepare_v2(db, up, -1, &u, nullptr) != SQLITE_OK)
+        throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
+    bind(u, 1, safe(i.title));
+    bind(u, 2, safe(i.body));
+    bind(u, 3, safe(i.url));
+    sqlite3_bind_int(u, 4, i.weight);
+    bind(u, 5, i.kind);
+    bind(u, 6, safe(i.klass));
+    i.due_at ? sqlite3_bind_int64(u, 7, i.due_at) : sqlite3_bind_null(u, 7);
+    i.event_at ? sqlite3_bind_int64(u, 8, i.event_at) : sqlite3_bind_null(u, 8);
+    bind(u, 9, i.source);
+    bind(u, 10, i.src_uid);
+    rc = sqlite3_step(u);
+    sqlite3_finalize(u);
+    if (rc != SQLITE_DONE) throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
     return false;
 }
 
@@ -200,7 +219,7 @@ void Store::clear_state(const std::string &like) {
 
 void Store::put_lessons(const std::string &source, const std::string &from, const std::string &to,
                         const std::vector<Lesson> &rows) {
-    exec(db, "BEGIN IMMEDIATE");
+    exec(db, "SAVEPOINT lessons");
     try {
         sqlite3_stmt *d = nullptr;
         if (sqlite3_prepare_v2(db, "DELETE FROM lessons WHERE source=? AND date BETWEEN ? AND ?", -1,
@@ -222,10 +241,10 @@ void Store::put_lessons(const std::string &source, const std::string &from, cons
             bind(s, 1, source);
             bind(s, 2, l.date);
             bind(s, 3, l.hour);
-            bind(s, 4, l.subject);
-            bind(s, 5, l.subject_name);
-            bind(s, 6, l.room);
-            bind(s, 7, l.teacher);
+            bind(s, 4, safe(l.subject));
+            bind(s, 5, safe(l.subject_name));
+            bind(s, 6, safe(l.room));
+            bind(s, 7, safe(l.teacher));
             bind(s, 8, l.state);
             bind(s, 9, l.begins);
             bind(s, 10, l.ends);
@@ -238,10 +257,10 @@ void Store::put_lessons(const std::string &source, const std::string &from, cons
         }
         sqlite3_finalize(s);
     } catch (...) {
-        exec(db, "ROLLBACK");
+        sqlite3_exec(db, "ROLLBACK TO lessons; RELEASE lessons", nullptr, nullptr, nullptr);
         throw;
     }
-    exec(db, "COMMIT");
+    exec(db, "RELEASE lessons");
 }
 
 std::vector<Lesson> Store::lessons(const std::string &from, const std::string &to) {
@@ -258,7 +277,8 @@ std::vector<Lesson> Store::lessons(const std::string &from, const std::string &t
         return v ? std::string((const char *)v, sqlite3_column_bytes(s, c)) : std::string();
     };
     std::vector<Lesson> out;
-    while (sqlite3_step(s) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
         Lesson l;
         l.source = text(0);
         l.date = text(1);
@@ -273,6 +293,7 @@ std::vector<Lesson> Store::lessons(const std::string &from, const std::string &t
         out.push_back(std::move(l));
     }
     sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) throw std::runtime_error("store: lessons read truncated");
     return out;
 }
 
@@ -288,7 +309,8 @@ std::vector<Item> read_items(sqlite3_stmt *s) {
         return v ? std::string((const char *)v, sqlite3_column_bytes(s, c)) : std::string();
     };
     std::vector<Item> out;
-    while (sqlite3_step(s) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
         Item i;
         i.id = sqlite3_column_int64(s, 0);
         i.source = text(1);
@@ -305,6 +327,7 @@ std::vector<Item> read_items(sqlite3_stmt *s) {
         out.push_back(std::move(i));
     }
     sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) throw std::runtime_error("store: items read truncated");
     return out;
 }
 

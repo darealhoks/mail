@@ -47,7 +47,7 @@ std::string html_unescape(const std::string &s) {
         } else if (e.size() > 3 && e[1] == '#') {
             long cp = strtol(e.c_str() + (e[2] == 'x' || e[2] == 'X' ? 3 : 2), nullptr,
                              e[2] == 'x' || e[2] == 'X' ? 16 : 10);
-            if (cp <= 0 || cp > 0x10FFFF) {
+            if (cp <= 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
                 o += e;
             } else if (cp < 0x80) {
                 o += (char)cp;
