@@ -47,9 +47,9 @@ std::string access_token() {
     });
 }
 
-std::string api(const std::string &path, bool post = false) {
+std::string api(const std::string &path, bool post = false, const std::string &body = "") {
     std::vector<std::string> h{"Authorization: Bearer " + access_token()};
-    HttpResponse r = post ? http_post_form(base() + path, "", h)
+    HttpResponse r = post ? http_post_form(base() + path, body, h)
                           : http_get(base() + path, h);
     if (r.status == 401) throw SessionExpired("bakalari: token rejected on " + path);
     if (r.status != 200)
@@ -144,8 +144,16 @@ std::vector<Item> fetch(Store &store) {
         throw std::runtime_error("bakalari: set [source.bakalari] url in the config first");
     std::vector<Item> out;
 
+    // marks?from, komens dateFrom and homeworks?from filter on the item's own date, so an old
+    // item edited today would never come back incrementally: re-pull everything every sweep.
+    // wall clock, not a tick count, so the first tick after the laptop was off still sweeps;
+    // an unset key is a cold start, and that is what maild --cold clears to force one
+    long long swept = strtoll(store.get_state("bakalari.swept_at").c_str(), nullptr, 10);
+    bool full = now() - swept > 2 * 3600;
+    std::string since = ymd(now() - 30 * DAY);
+
     {
-        long long from = std::min(scrape_since(), now() - 14 * DAY);
+        long long from = full ? scrape_since() : now() - 30 * DAY;
         Json j(api("/api/3/homeworks?from=" + ymd(from) + "&to=" + ymd(now() + 60 * DAY)));
         for (auto e : arr(j.root, "Homeworks", "homeworks")) {
             std::string id = s(e, "ID");
@@ -163,7 +171,7 @@ std::vector<Item> fetch(Store &store) {
     }
 
     {
-        Json j(api("/api/3/marks"));
+        Json j(api(full ? "/api/3/marks" : "/api/3/marks?from=" + since));
         for (auto subj : arr(j.root, "Subjects", "marks")) {
             std::string abbrev = trim(s(subj.at_key("Subject"), "Abbrev"));
             for (auto m : arr(subj, "Marks", "marks")) {
@@ -189,7 +197,8 @@ std::vector<Item> fetch(Store &store) {
     }
 
     {
-        Json j(api("/api/3/komens/messages/received", true));
+        Json j(api("/api/3/komens/messages/received", true,
+                   full ? "" : "dateFrom=" + since));
         for (auto e : arr(j.root, "Messages", "komens")) {
             std::string id = s(e, "Id");
             if (id.empty()) continue;
@@ -269,6 +278,7 @@ std::vector<Item> fetch(Store &store) {
             store.put_lessons("bakalari", monday, ymd(classify::epoch(monday) + 6 * DAY), grid);
     }
 
+    if (full) store.set_state("bakalari.swept_at", std::to_string(now()));
     return out;
 }
 

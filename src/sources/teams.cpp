@@ -10,6 +10,7 @@
 
 #include "classify.h"
 #include "config.h"
+#include "creds.h"
 #include "http.h"
 #include "json.h"
 #include "teams_auth.h"
@@ -30,8 +31,19 @@ struct GraphError : std::runtime_error {
     long status;
 };
 
-std::string graph(const std::string &token, const std::string &url) {
+// oauth::access_token hands back the cached token until it is near expiry; dropping it
+// from the creds file ("teams" == CREDS in teams_auth.cpp) is what forces a real refresh
+std::string remint() {
+    auto kv = creds_load("teams");
+    kv.erase("access_token");
+    kv.erase("access_expires_at");
+    creds_save("teams", kv);
+    return access_token();
+}
+
+std::string graph(std::string &token, const std::string &url) {
     std::vector<std::string> h{"Authorization: Bearer " + token};
+    bool reminted = false;
     for (int attempt = 0;; attempt++) {
         HttpResponse r = http_get(url, h);
         if (r.status == 200) return r.body;
@@ -40,7 +52,15 @@ std::string graph(const std::string &token, const std::string &url) {
             std::this_thread::sleep_for(std::chrono::seconds(2 << attempt));
             continue;
         }
-        if (r.status == 401) throw SessionExpired("teams: token rejected on " + url);
+        if (r.status == 401) {
+            // a sweep can outlive the token; only a 401 on a freshly minted one is a dead session
+            if (reminted) throw SessionExpired("teams: token rejected on " + url);
+            reminted = true;
+            token = remint();
+            h[0] = "Authorization: Bearer " + token;
+            attempt = -1;
+            continue;
+        }
         throw GraphError(r.status, "teams: http " + std::to_string(r.status) + " on " + url);
     }
 }
@@ -165,7 +185,7 @@ std::vector<Channel> load_channels(const std::string &blob) {
     return out;
 }
 
-std::vector<Channel> channels(const std::string &token, Store &st) {
+std::vector<Channel> channels(std::string &token, Store &st) {
     long long at = strtoll(st.get_state("teams.channels_at").c_str(), nullptr, 10);
     if (now() - at < CHANNELS_TTL) {
         auto c = load_channels(st.get_state("teams.channels"));
