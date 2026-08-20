@@ -23,6 +23,17 @@ long long stale_after(Store &s) {
     return iv ? iv * 2 : STALE_AFTER;
 }
 
+// the wall clock runs while the box is off; only time we were awake could have held a poll
+long long stale_age(long long at) {
+    long long age = (long long)time(nullptr) - at, up = 0;
+    if (FILE *f = fopen("/proc/uptime", "r")) {
+        double u = 0;
+        if (fscanf(f, "%lf", &u) == 1) up = (long long)u;
+        fclose(f);
+    }
+    return up > 0 && up < age ? up : age;
+}
+
 }  // namespace
 
 std::string fold(const std::string &s) { return classify::norm(s); }
@@ -222,6 +233,20 @@ Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit
         out.rows.push_back(std::move(r));
     }
     if (config().flag("general.marks_newest_last")) std::reverse(out.rows.begin(), out.rows.end());
+
+    for (const Absence &a : s.absences())
+        if (std::find(ab.begin(), ab.end(), a.subject) != ab.end()) out.absences.push_back(a);
+    return out;
+}
+
+std::vector<Absence> absence_rows(Store &s, const std::vector<std::string> &filters) {
+    std::vector<Absence> out;
+    for (Absence &a : s.absences()) {
+        if (!filters.empty()) {
+            if (std::find(filters.begin(), filters.end(), fold(a.subject)) == filters.end()) continue;
+        } else if (blacklisted(a.subject, abbrev(a.subject))) continue;
+        out.push_back(std::move(a));
+    }
     return out;
 }
 
@@ -246,10 +271,17 @@ void compact(Timetable &t) {
     t.grid = grid;
 }
 
-Timetable timetable(Store &s) {
+Timetable timetable(Store &s, const std::string &monday) {
     Timetable t;
-    t.monday = wanted_monday();
+    t.monday = monday.empty() ? wanted_monday() : monday;
     t.rows = s.lessons(t.monday, ymd_plus(t.monday, 6));
+    t.permanent = t.monday == PERM_MONDAY;  // picked explicitly: the stored week is the grid
+    if (t.rows.empty()) {  // out of season, or a week outside what maild fetched
+        t.rows = s.lessons(PERM_MONDAY, PERM_SUNDAY);
+        t.permanent = !t.rows.empty();
+        // PERM_MONDAY is the 5th: the day of month carries the weekday offset
+        for (Lesson &l : t.rows) l.date = ymd_plus(t.monday, atoi(l.date.c_str() + 8) - 5);
+    }
     // rows arrive date-major, hour ascending: both axes come out in display order
     for (const Lesson &l : t.rows) {
         if (t.days.empty() || t.days.back() != l.date) t.days.push_back(l.date);
@@ -318,7 +350,7 @@ std::vector<SourceStatus> status(Store &s) {
         if (st.signed_in && st.error.empty()) st.refreshed_at = oauth::last_refresh_at(src.name);
         st.fetched_at = s.last_ok_fetch(src.name);
         st.offline = off;
-        st.stale = !st.fetched_at || (long long)time(nullptr) - st.fetched_at > stale_after(s);
+        st.stale = !st.fetched_at || stale_age(st.fetched_at) > stale_after(s);
         out.push_back(std::move(st));
     }
     return out;
@@ -341,7 +373,7 @@ std::vector<Gripe> gripes(Store &s) {
                                ago(f.failing_since ? f.failing_since : f.at) +
                                (f.error.empty() ? "" : " — " + f.error),
                            true});
-        } else if ((long long)time(nullptr) - f.at > limit && config().flag("general.stale_warn")) {
+        } else if (stale_age(f.at) > limit && config().flag("general.stale_warn")) {
             out.push_back({std::string(src) + ": data is older than the poll rate" + rate +
                                ", is " APP_NAME "d running?",
                            false});

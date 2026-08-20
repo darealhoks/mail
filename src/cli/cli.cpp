@@ -45,7 +45,8 @@ int help() {
     row("dismiss, d <n>...", "hide items by their feed number");
     row("open, o <n>", "open item <n> in a browser");
     row("marks, m [subj...]", "marks, newest first; subject abbrevs filter");
-    row("timetable, r", "this week's timetable (next week on the weekend)");
+    row("absence, b [subj...]", "absence per subject; subject abbrevs filter");
+    row("timetable, r [week]", "the week's timetable; +n/-n or a date picks another");
     row("next", "the upcoming lesson; nothing (exit 1) if none");
     row("new, n", "one-line summary of what you haven't seen");
     row("auth, a [source]", "sign-in state; a source name to sign in");
@@ -80,7 +81,7 @@ int next_help() {
 }
 
 void usage() {
-    fprintf(stderr, "usage: %s [filter...] | %s <dismiss|open|marks|new|auth|help>\n", CLI_NAME,
+    fprintf(stderr, "usage: %s [filter...] | %s <dismiss|open|marks|absence|new|auth|help>\n", CLI_NAME,
             CLI_NAME);
     fprintf(stderr, "       %s\n", c("90", CLI_NAME " help  for the full list", 2).c_str());
 }
@@ -137,6 +138,18 @@ int marks(const std::vector<std::string> &argf) {
     for (const std::string &l : paint::mark_lines(m, (size_t)term_cols())) puts(l.c_str());
     if (m.rows.empty())
         puts(c("90", filters.empty() ? "no marks" : "no marks for that subject").c_str());
+    return 0;
+}
+
+int absence(const std::vector<std::string> &argf) {
+    std::vector<std::string> filters;
+    for (const auto &a : argf) filters.push_back(fold(a));
+
+    Store s;
+    std::vector<Absence> rows = view::absence_rows(s, filters);
+    for (const std::string &l : paint::absence_lines(rows)) puts(l.c_str());
+    if (rows.empty())
+        puts(c("90", filters.empty() ? "no absences" : "no absences for that subject").c_str());
     return 0;
 }
 
@@ -202,9 +215,21 @@ int dismiss(int argc, char **argv) {
     return 0;
 }
 
-int timetable() {
+int timetable(int argc, char **argv) {
+    std::string monday;
+    if (argc > 0) {
+        std::string a = argv[0];
+        if (a[0] == '+' || a[0] == '-')
+            monday = view::ymd_plus(view::wanted_monday(), 7 * atoi(a.c_str()));
+        else if (long long t = view::local_at(a, "12:00"))  // noon: no dst edge either way
+            monday = monday_of(t);
+        else {
+            fprintf(stderr, "usage: %s timetable [+n|-n|YYYY-MM-DD]\n", CLI_NAME);
+            return 2;
+        }
+    }
     Store s;
-    view::Timetable tt = view::timetable(s);
+    view::Timetable tt = view::timetable(s, monday);
     paint::Geom g;
     for (const std::string &l : paint::grid_lines(tt, paint::NO_CELL, paint::NO_CELL, 0,
                                                   paint::term_cols(false), g))
@@ -335,6 +360,17 @@ int selfcheck() {
         // re-fetch of the same week without CJL: the stale row must not survive
         t.put_lessons("bakalari", "2026-08-17", "2026-08-23", {l});
         std::vector<Lesson> after = t.lessons("2026-08-17", "2026-08-23");
+        Absence a{"bakalari", "MAT", 48, 12, 20};
+        t.put_absences("bakalari", {a, {"bakalari", "CJL", 0, 0, 20}});
+        a.absent = 3;
+        t.put_absences("bakalari", {a});  // a re-fetch replaces, never accumulates
+        std::vector<Absence> ab = t.absences();
+        // the permanent grid stands in for a week with nothing stored, re-dated onto it
+        Lesson perm = l;
+        perm.date = "1970-01-07";  // wednesday of the PERM_MONDAY week
+        t.put_lessons("bakalari-perm", PERM_MONDAY, PERM_SUNDAY, {perm});
+        view::Timetable have = view::timetable(t, "2026-08-17");
+        view::Timetable fall = view::timetable(t, "2026-08-24");
         unlink(p.c_str());
         unlink((p + "-wal").c_str());
         unlink((p + "-shm").c_str());
@@ -344,6 +380,17 @@ int selfcheck() {
             got[1].ends != "10:40" || got[1].source != "bakalari" || after.size() != 1 ||
             after[0].hour != "2" || !t.lessons("2026-08-24", "2026-08-30").empty()) {
             fputs("selfcheck failed: lessons round-trip\n", stderr);
+            return 1;
+        }
+        if (have.permanent || have.days != std::vector<std::string>{"2026-08-17"} ||
+            !fall.permanent || fall.days != std::vector<std::string>{"2026-08-26"} ||
+            fall.rows[0].subject != "MAT") {
+            fputs("selfcheck failed: permanent fallback\n", stderr);
+            return 1;
+        }
+        if (ab.size() != 1 || ab[0].subject != "MAT" || ab[0].absent != 3 || ab[0].lessons != 48 ||
+            ab[0].pct() < 6.24 || ab[0].pct() > 6.26 || Absence{}.pct() != 0) {
+            fputs("selfcheck failed: absence round-trip\n", stderr);
             return 1;
         }
     }
@@ -645,7 +692,8 @@ int main(int argc, char **argv) {
         }
         ensure_signed();
         if (verb(v[0], "marks", "m")) return marks({v + 1, v + n});
-        if (verb(v[0], "timetable", "r")) return timetable();
+        if (verb(v[0], "absence", "b")) return absence({v + 1, v + n});
+        if (verb(v[0], "timetable", "r")) return timetable(n - 1, v + 1);
         // no short alias for next: `n` is `new`
         if (!strcmp(v[0], "next")) return n > 1 && !strcmp(v[1], "--help") ? next_help() : next_lesson();
         if (verb(v[0], "dismiss", "d")) return dismiss(n - 1, v + 1);

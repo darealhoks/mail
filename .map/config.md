@@ -36,10 +36,13 @@ pre-sections file keeps working; nothing is dropped.
     avg_round  1.5, 2.5, 3.5, 4.5    average floors for marks 2..5 (avg_mark())
     mark_scale 1-5                   best-worst mark digits
     points     90, 75, 60, 40        percent floors for marks 1..4 (points_mark())
+    absence_warn 15                  absence percent that turns a subject yellow
+    absence_max  25                  ...and red; overrides the school's own threshold
 
     [key]
     f = feed                         tui mode switch; free-form keys, one char each
     m = marks
+    b = absence
     t = timetable
 
     [bind]
@@ -52,7 +55,9 @@ frontend will draw, clamped to what the terminal holds — never padded past it.
 header takes the widest form that fits, in order: `8:00-8:45`, `00-45`, start over end on
 two rows, none. `view::compact` drops any hour column and any day row nothing occupies, so a
 0th hour or a long tail costs nothing when the week does not use it. In the tui the block is
-centred in the pane both ways. Turning a `[table]` key off shrinks the grid: `time = no` alone frees the
+centred in the pane both ways. The header line doubles as the week control: `◂` and `▸` step
+a week, the label opens a menu of this week ±2/+4 — clicked, or `[` `]` `w` from the keyboard.
+The cli prints the same header without the arrows (`rows <= 0`), so a pipe stays plain. Turning a `[table]` key off shrinks the grid: `time = no` alone frees the
 whole header and lets narrow columns hold the subject.
 
 `[bind]` maps a word of your own to a command line. `expand_bind` in `src/cli/cli.cpp` runs
@@ -93,6 +98,10 @@ Mark colors and the average both go through `school.points`/`school.mark_scale`
 plain digit by the scale, and `1-` is half a grade worse. An average prints as `1,50 (2)`
 (`paint::avg_str`/`avg_color`), the bracket being `avg_mark()` on `school.avg_round`. In the
 tui a subject whose every mark is ungradeable shows a green `N` instead.
+
+Absence colours come from `school.absence_warn`/`absence_max`, not from upstream: Bakalari's
+`PercentageThreshold` is stored per row but only used when `absence_max` is 0, since the limit
+differs per programme (25 normally, 75 on an individual plan).
 
 Blacklisted classes drop out of the feed before it is numbered, so `dismiss`/`open` indices
 stay contiguous.

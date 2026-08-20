@@ -90,8 +90,13 @@ std::string collapse(const std::string &s) {
             size_t b = i;
             while (i < s.size() && !isspace((unsigned char)s[i])) i++;
             std::string u = s.substr(b, i - b);
-            while (!u.empty() && strchr(".,;:)]}", u.back())) u.pop_back();
+            std::string marks;  // a styled url swallows its closing marker into the word
+            while (!u.empty() && strchr(".,;:)]}*_`~", u.back())) {
+                if (strchr("*_`~", u.back())) marks.insert(marks.begin(), u.back());
+                u.pop_back();
+            }
             if (o.find(u) == std::string::npos) o += u;  // teams repeats the href as link text
+            o += marks;
             continue;
         }
         unsigned char c = (unsigned char)s[i];
@@ -126,12 +131,47 @@ std::function<void(size_t, size_t, const std::string &)> progress;
 
 std::string plain_text(const std::string &html) {
     static const char *BREAK[] = {"<br", "</p", "</div", "</li", "</tr", "<li"};
+    // ponytail: element tags only; teams also bolds via <span style="font-weight:bold">,
+    // which needs span-close tracking to pair up
+    static const struct {
+        const char *tag;
+        char mark;
+    } STYLE[] = {{"b", '*'},    {"strong", '*'}, {"i", '_'},  {"em", '_'},
+                 {"code", '`'}, {"s", '~'},      {"del", '~'}};
     std::string t;
+    std::vector<std::pair<char, size_t>> open;  // marker + where its opener landed in t
     bool in_tag = false;
     for (size_t i = 0; i < html.size(); i++) {
         if (html[i] == '<') {
             for (const char *b : BREAK)
                 if (tag_at(html, i, b)) t += '\n';
+            size_t n = i + 1 + (html[i + 1] == '/');
+            for (const auto &s : STYLE) {
+                if (!tag_at(html, n, s.tag)) continue;
+                if (html[i + 1] != '/') {
+                    open.emplace_back(s.mark, t.size());
+                    t += s.mark;
+                    break;
+                }
+                size_t at = std::string::npos;
+                for (size_t k = open.size(); k-- > 0;)
+                    if (open[k].first == s.mark && open[k].second < t.size()) {
+                        at = open[k].second;
+                        open.erase(open.begin() + k);
+                        break;
+                    }
+                if (at == std::string::npos) break;
+                // a marker must sit against its text, or the wrap can strand it on a line
+                // of its own and paint will show it literally
+                std::string in = t.substr(at + 1);
+                t.resize(at);
+                size_t b = in.find_first_not_of(" \t\n"), e = in.find_last_not_of(" \t\n");
+                if (b == std::string::npos) t += in;
+                else
+                    t += in.substr(0, b) + s.mark + in.substr(b, e - b + 1) + s.mark +
+                         in.substr(e + 1);
+                break;
+            }
             in_tag = true;
         } else if (html[i] == '>') {
             in_tag = false;
@@ -141,6 +181,13 @@ std::string plain_text(const std::string &html) {
         }
     }
     return collapse(html_unescape(html_unescape(t)));
+}
+
+std::string style_strip(const std::string &s) {
+    std::string o;
+    for (char c : s)
+        if (!strchr("*_`~", c)) o += c;
+    return o;
 }
 
 namespace {
@@ -270,8 +317,8 @@ bool to_item(simdjson::dom::element m, const Channel &ch, Item &out) {
             task = true;
 
     std::string created = sv(m, "createdDateTime");
-    classify::Result r =
-        classify::run(subject + (subject.empty() ? "" : " ") + text, task, created);
+    classify::Result r = classify::run(
+        style_strip(subject + (subject.empty() ? "" : " ") + text), task, created);
 
     out.source = "teams";
     out.klass = ch.name.empty() || ch.name == "General" || ch.name == "Obecné"

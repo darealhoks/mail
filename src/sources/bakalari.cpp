@@ -73,6 +73,16 @@ std::string s(simdjson::simdjson_result<El> e, const char *k) {
     return e.get(v) ? std::string() : s(v, k);
 }
 
+// counts come back as numbers, but a missing or non-numeric one must read as zero
+double num(El e, const char *k) {
+    double d = 0;
+    if (e.at_key(k).get(d)) {
+        int64_t i = 0;
+        return e.at_key(k).get(i) ? 0 : (double)i;
+    }
+    return d;
+}
+
 simdjson::dom::array arr(El e, const char *k, const char *what) {
     auto a = e.at_key(k).get_array();
     if (a.error()) throw std::runtime_error(std::string("bakalari: ") + what + " missing array " + k);
@@ -90,6 +100,52 @@ std::string ymd(long long t) {
 }
 
 const long long DAY = 86400;
+
+// every timetable payload (actual and permanent alike) ships the same five side tables
+struct Side {
+    std::map<std::string, std::string> subject, subject_name, room, hour, begins, ends, teacher,
+        teacher_name;
+};
+
+Side side_tables(El root, std::map<std::string, std::string> *by_name) {
+    Side t;
+    // Subjects[].Id is space-padded (" 7") while Atoms[].SubjectId is not
+    for (auto sub : arr(root, "Subjects", "timetable")) {
+        std::string id = trim(s(sub, "Id"));
+        t.subject[id] = s(sub, "Abbrev");
+        t.subject_name[id] = s(sub, "Name");
+        if (by_name && !t.subject_name[id].empty() && !t.subject[id].empty())
+            (*by_name)[t.subject_name[id]] = t.subject[id];
+    }
+    for (auto r : arr(root, "Rooms", "timetable")) t.room[trim(s(r, "Id"))] = s(r, "Abbrev");
+    for (auto e : arr(root, "Teachers", "timetable")) {
+        std::string id = trim(s(e, "Id"));
+        t.teacher[id] = s(e, "Abbrev");
+        t.teacher_name[id] = s(e, "Name");
+    }
+    for (auto h : arr(root, "Hours", "timetable")) {
+        std::string id = trim(s(h, "Id"));
+        t.hour[id] = s(h, "Caption");
+        t.begins[id] = s(h, "BeginTime");
+        t.ends[id] = s(h, "EndTime");
+    }
+    return t;
+}
+
+Lesson lesson_of(Side &t, El at, const std::string &date) {
+    std::string hid = trim(s(at, "HourId")), sid = trim(s(at, "SubjectId"));
+    Lesson l;
+    l.date = date;
+    l.hour = t.hour[hid];
+    l.subject = t.subject[sid];
+    l.subject_name = t.subject_name[sid];
+    l.room = t.room[trim(s(at, "RoomId"))];
+    l.teacher = t.teacher[trim(s(at, "TeacherId"))];
+    l.teacher_name = t.teacher_name[trim(s(at, "TeacherId"))];
+    l.begins = t.begins[hid];
+    l.ends = t.ends[hid];
+    return l;
+}
 
 }  // namespace
 
@@ -207,6 +263,16 @@ std::vector<Item> fetch(Store &store) {
             i.klass = s(e.at_key("Sender"), "Name");
             i.title = s(e, "Title");
             i.body = teams::plain_text(s(e, "Text"));
+            // a "see attached" message is empty text: name the files, same marker teams writes
+            simdjson::dom::array atts;
+            if (!e.at_key("Attachments").get_array().get(atts)) {
+                size_t na = 0;
+                for (auto a : atts) {
+                    std::string name = trim(s(a, "Name"));
+                    if (!name.empty()) i.body += (na++ ? ", " : " [att: ") + name;
+                }
+                if (na) i.body += "]";
+            }
             std::string sent = s(e, "SentDate");
             classify::Result c = classify::run(i.title + " || " + i.body, false, sent);
             i.kind = classify::kind(c);
@@ -218,23 +284,10 @@ std::vector<Item> fetch(Store &store) {
     }
 
     // this week and the next; the lessons table is what `mailc timetable` renders
+    std::map<std::string, std::string> by_name;  // full subject name -> abbrev, for absences
     for (long long week : {now(), now() + 7 * DAY}) {
         Json j(api("/api/3/timetable/actual?date=" + ymd(week)));
-        std::map<std::string, std::string> subject, subject_name, room, hour, begins, ends, teacher;
-        // Subjects[].Id is space-padded (" 7") while Atoms[].SubjectId is not
-        for (auto sub : arr(j.root, "Subjects", "timetable")) {
-            std::string id = trim(s(sub, "Id"));
-            subject[id] = s(sub, "Abbrev");
-            subject_name[id] = s(sub, "Name");
-        }
-        for (auto r : arr(j.root, "Rooms", "timetable")) room[trim(s(r, "Id"))] = s(r, "Abbrev");
-        for (auto t : arr(j.root, "Teachers", "timetable")) teacher[trim(s(t, "Id"))] = s(t, "Abbrev");
-        for (auto h : arr(j.root, "Hours", "timetable")) {
-            std::string id = trim(s(h, "Id"));
-            hour[id] = s(h, "Caption");
-            begins[id] = s(h, "BeginTime");
-            ends[id] = s(h, "EndTime");
-        }
+        Side S = side_tables(j.root, &by_name);
         std::vector<Lesson> grid;
         std::string monday;
         for (auto day : arr(j.root, "Days", "timetable")) {
@@ -244,17 +297,12 @@ std::vector<Item> fetch(Store &store) {
                 simdjson::dom::element ch;
                 bool changed = !at.at_key("Change").get(ch) && !ch.is_null();
                 std::string type = changed ? s(ch, "ChangeType") : "";
-                std::string hid = trim(s(at, "HourId")), sid = trim(s(at, "SubjectId"));
-                Lesson l;
-                l.date = dd;
-                l.hour = hour[hid];
-                l.subject = subject[sid];
-                l.subject_name = subject_name[sid];
-                l.room = room[trim(s(at, "RoomId"))];
-                l.teacher = teacher[trim(s(at, "TeacherId"))];
+                std::string what = changed ? s(ch, "TypeName") : "";
+                if (what.empty()) what = type;
+                std::string desc = changed ? s(ch, "Description") : "";
+                Lesson l = lesson_of(S, at, dd);
                 l.state = type == "Canceled" || type == "Removed" ? "x" : changed ? "!" : "";
-                l.begins = begins[hid];
-                l.ends = ends[hid];
+                l.change = changed ? trim(desc.empty() ? what : what + ": " + desc) : "";
                 if (!l.hour.empty() && !l.subject.empty()) grid.push_back(std::move(l));
                 if (!changed) continue;
                 // a change listed under one day can carry another day's date
@@ -263,11 +311,8 @@ std::vector<Item> fetch(Store &store) {
                 Item i;
                 i.source = "bakalari";
                 i.kind = "change";
-                i.klass = subject[trim(s(at, "SubjectId"))];
-                std::string what = s(ch, "TypeName");
-                if (what.empty()) what = type;
-                i.title = s(ch, "Description");
-                i.title = i.title.empty() ? what : what + ": " + i.title;
+                i.klass = S.subject[trim(s(at, "SubjectId"))];
+                i.title = desc.empty() ? what : what + ": " + desc;
                 i.body = trim(s(ch, "Hours") + " " + s(ch, "Time"));
                 i.event_at = classify::epoch(date);
                 i.src_uid = "tt:" + date.substr(0, 10) + ":" + s(at, "HourId") + ":" + type;
@@ -276,6 +321,72 @@ std::vector<Item> fetch(Store &store) {
         }
         if (!monday.empty())
             store.put_lessons("bakalari", monday, ymd(classify::epoch(monday) + 6 * DAY), grid);
+    }
+
+    // the recurring grid, what the table falls back to out of season. it changes per semester,
+    // so fetch it only on a full sweep or when nothing is stored yet
+    if (full || store.lessons(PERM_MONDAY, PERM_SUNDAY).empty()) {
+        Json j(api("/api/3/timetable/permanent"));
+        Side S = side_tables(j.root, &by_name);
+        std::vector<Lesson> grid;
+        int idx = 0;
+        for (auto day : arr(j.root, "Days", "timetable")) {
+            int dow = (int)num(day, "DayOfWeek");  // 1 = monday; missing means take the order
+            int off = dow >= 1 && dow <= 7 ? dow - 1 : idx;
+            idx++;
+            if (off > 6) continue;
+            for (auto at : arr(day, "Atoms", "timetable")) {
+                Lesson l = lesson_of(S, at, ymd(classify::epoch(PERM_MONDAY) + off * DAY));
+                if (!l.hour.empty() && !l.subject.empty()) grid.push_back(std::move(l));
+            }
+        }
+        store.put_lessons("bakalari-perm", PERM_MONDAY, PERM_SUNDAY, grid);
+    }
+
+    {
+        Json j(api("/api/3/absence/student"));
+        // 0.2 and 20 both mean 20%: which one the school sends is not documented
+        double thr = num(j.root, "PercentageThreshold");
+        if (thr > 0 && thr <= 1) thr *= 100;
+        std::vector<Absence> abs;
+        for (auto e : arr(j.root, "AbsencesPerSubject", "absence")) {
+            Absence a;
+            a.subject = s(e, "SubjectName");
+            if (a.subject.empty()) a.subject = "?";  // upstream sends one nameless row; still counts
+            auto it = by_name.find(a.subject);
+            if (it != by_name.end()) a.subject = it->second;  // marks key on the abbrev
+            a.lessons = (int)num(e, "LessonsCount");
+            // web's Zameškáno is Base alone; Late/Soon/School are tracked apart and don't count
+            a.absent = (int)num(e, "Base");
+            if (a.lessons < 0 || a.absent < 0 || a.absent > a.lessons) continue;
+            a.threshold = thr;
+            abs.push_back(std::move(a));
+        }
+        store.put_absences("bakalari", abs);
+    }
+
+    {
+        Json j(api("/api/3/events/my?from=" + ymd(now() - 14 * DAY) +
+                   "&to=" + ymd(now() + 60 * DAY)));
+        for (auto e : arr(j.root, "Events", "events")) {
+            std::string id = s(e, "Id");
+            if (id.empty()) continue;
+            Item i;
+            i.source = "bakalari";
+            i.kind = "info";
+            i.klass = s(e.at_key("EventType"), "Name");
+            i.title = s(e, "Title");
+            i.body = teams::plain_text(s(e, "Description"));
+            // the start sits in Times[]; some deployments hoist it to the top level
+            std::string start = s(e, "StartTime");
+            if (start.empty()) {
+                auto times = e.at_key("Times").get_array();
+                if (!times.error() && times.value().size()) start = s(times.value().at(0), "StartTime");
+            }
+            i.event_at = classify::epoch(start);
+            i.src_uid = "event:" + id;
+            out.push_back(std::move(i));
+        }
     }
 
     if (full) store.set_state("bakalari.swept_at", std::to_string(now()));

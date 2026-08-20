@@ -32,6 +32,9 @@ std::string when(long long due);
 std::string date_short(const std::string &ymd);
 // urls survive into the body text; make them stand out without breaking the wrap width
 std::string link_up(const std::string &l);
+// teams::plain_text markers -> sgr, one wrapped line at a time; `open` is the span state
+// carried onto the next line, so a bold phrase survives the wrap
+std::string style_up(const std::string &l, unsigned &open);
 // timetable geometry, shared by the cli and the tui: one size decision for both
 struct TableLayout {
     size_t cw = 3;      // inner cell width, separators excluded
@@ -59,11 +62,15 @@ struct Post {
 std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered);
 // period headers, the mark rows, then the averages; the class column appears only when the
 // rows hold more than one class
+// "MAT  3/48  6%" per subject; red past the school's threshold, uncoloured when it sent none
+std::vector<std::string> absence_lines(const std::vector<Absence> &rows);
 std::vector<std::string> mark_lines(const view::Marks &m, size_t width);
 
 // where the grid landed on screen, so a click maps back to a cell
 struct Geom {
     size_t cw = 0, gut = 3, blk = 1, top = 2, left = 0, nd = 0, nh = 0;
+    // the week control on the header line, 1-based columns; 0 when it was not drawn (rows <= 0)
+    size_t hdr = 0, prev = 0, lbl0 = 0, lbl1 = 0, next = 0;
 };
 inline const size_t NO_CELL = (size_t)-1;  // grid_lines: no cursor cell
 // rows > 0 fills that many terminal rows: taller cells, the block centred in the pane.

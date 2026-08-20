@@ -14,7 +14,7 @@
                   + paint.cpp: the renderers themselves — feed posts, marks rows, timetable grid, sgr helpers
     src/maild/    main.cpp     oneshot fetch + notify; run from cron: */15 * * * * maild
     src/cli/      cli.cpp      argv, binds, layout, paint
-    src/tui/      tui.cpp      raw-mode feed/marks/timetable, tab strip, keys + mouse, no flags
+    src/tui/      tui.cpp      raw-mode feed/marks/timetable/absence, tab strip, keys + mouse, no flags
 
 `make` builds all three binaries from `src/core src/sources src/view` plus one main each.
 `make check` runs the two `--selfcheck`s; `make corpus` scores the classifier against
@@ -25,10 +25,11 @@
     (none)          the feed, newest deadlines first; bare words are filters
     auth [src]      sign-in state, or sign into one source
     new             counts for the shell prompt hook; prints, never prompts
-    marks [filter]  marks by period
-    timetable       the week's grid
+    marks [filter]  marks by period, with per-subject absence under it
+    absence, b      absence per subject; bare words filter by subject
+    timetable       the week's grid; +n/-n or YYYY-MM-DD picks another week
     next [--help]   the next lesson; -f/-s format it, --help lists the % verbs
     dismiss / open  by feed index
 
-Aliases are one letter (`a n m r d o`; `next` has none — `n` is `new`) and any of them can be
+Aliases are one letter (`a n m r d o b`; `next` has none — `n` is `new`) and any of them can be
 taken over by a `[bind]` entry.

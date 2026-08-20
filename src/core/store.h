@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -21,10 +22,23 @@ struct Item {
     long long fetched_at = 0;  // read side only; insert_item stamps its own
 };
 
+// a permanent (recurring) grid carries no dates: it is stored on this real monday's week and
+// re-dated by view::timetable onto whatever week is asked for
+inline constexpr const char *PERM_MONDAY = "1970-01-05", *PERM_SUNDAY = "1970-01-11";
+
 // one timetable cell; state "x" cancelled, "!" changed, "" normal
 struct Lesson {
     std::string source, date, hour, subject, subject_name, room, teacher, state, begins, ends;
+    std::string teacher_name, change;  // full name; upstream's wording for state != ""
     std::string label() const { return subject + (room.empty() ? "" : " " + room); }
+};
+
+// absence snapshot for one subject; replaced wholesale each fetch, never accumulated
+struct Absence {
+    std::string source, subject;
+    int lessons = 0, absent = 0;
+    double threshold = 0;  // school's absence limit in percent, 0 when upstream sent none
+    double pct() const { return lessons > 0 ? 100.0 * absent / lessons : 0; }
 };
 
 // opens <name>.db and applies the schema; throws on failure
@@ -38,6 +52,14 @@ struct Store {
     void begin();
     void commit();
     void rollback();
+
+    // with defer set, the writes a source makes mid-fetch (cursors, lessons, absences) queue
+    // instead of hitting the db, so the network half of a fetch holds no write lock — a
+    // transaction spanning it would block every other writer (tui dismiss) for the whole fetch.
+    // flush() replays them in order, inside the caller's transaction; both clear the flag
+    bool defer = false;
+    void flush();
+    void drop_deferred();
 
     // returns true if the item was new ((source, src_uid) not already stored)
     bool insert_item(const Item &i);
@@ -57,6 +79,9 @@ struct Store {
     // replaces the source's lessons in [from, to] wholesale: lessons dropped upstream go away
     void put_lessons(const std::string &source, const std::string &from, const std::string &to,
                      const std::vector<Lesson> &rows);
+    // replaces the source's absences wholesale, same discipline as put_lessons
+    void put_absences(const std::string &source, const std::vector<Absence> &rows);
+    std::vector<Absence> absences();
     // all sources, dates in [from, to] ("YYYY-MM-DD"), by date then hour numerically
     std::vector<Lesson> lessons(const std::string &from, const std::string &to);
 
@@ -74,4 +99,9 @@ struct Store {
     void dismiss(const std::vector<long long> &ids);
 
     sqlite3 *db = nullptr;
+
+  private:
+    // true if the call was queued and must return without touching the db
+    bool queued(std::function<void()> f);
+    std::vector<std::function<void()>> deferred;
 };

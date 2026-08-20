@@ -18,6 +18,7 @@
 #include "http.h"
 #include "store.h"
 #include "view.h"
+#include "paint.h"
 #include "teams.h"
 
 namespace {
@@ -125,6 +126,15 @@ int selfcheck() {
         s.set_state("k", "v1");
         s.set_state("k", "v2");
         CHECK(s.get_state("k") == "v2");
+        s.defer = true;
+        s.set_state("k", "v3");
+        CHECK(s.get_state("k") == "v2");  // queued, not written
+        s.flush();
+        CHECK(s.get_state("k") == "v3" && !s.defer);
+        s.defer = true;
+        s.set_state("k", "v4");
+        s.drop_deferred();
+        CHECK(s.get_state("k") == "v3" && !s.defer);
         CHECK(s.insert_item(item("teams")));
     }
     remove(tmp.c_str());
@@ -143,6 +153,22 @@ int selfcheck() {
     CHECK(teams::plain_text("<a href=\"https://x.y/z\">https://x.y/z</a>.") == "https://x.y/z .");
     CHECK(teams::plain_text("&#268;au&nbsp;&#268;au") == "Čau Čau");
     CHECK(teams::plain_text("<div></div>  ") == "");
+    CHECK(teams::plain_text("<b>tučně</b> a <i>kurzíva</i>") == "*tučně* a _kurzíva_");
+    CHECK(teams::plain_text("<p><strong> dvě slova </strong>tady</p>") == "*dvě slova* tady");
+    CHECK(teams::plain_text("<b><i>obě</i></b>") == "*_obě_*");
+    CHECK(teams::plain_text("<b> </b>x") == "x");   // empty span leaves no marker behind
+    CHECK(teams::plain_text("</b>x") == "x");       // stray close is not a marker
+    CHECK(teams::plain_text("<b>https://x.y/z</b>") == "*https://x.y/z*");
+    CHECK(teams::style_strip("*a* _b_") == "a b");
+    {  // a span split by the wrap reopens on the next line; colour depends on the tty
+        unsigned open = 0;
+        std::string a = paint::style_up("*a", open), b = paint::style_up("c*", open);
+        CHECK(open == 0);
+        CHECK(a.find('*') == std::string::npos && a.find('a') != std::string::npos);
+        CHECK(b.find('*') == std::string::npos && b.find('c') != std::string::npos);
+        CHECK(a.find("\033[1m") != std::string::npos || a == "a");
+        CHECK((a.find("\033[1m") == std::string::npos) == (b.find("\033[1m") == std::string::npos));
+    }
 
     CHECK(classify::epoch("2026-08-16T00:00:00+02:00") == 1786838400);
     CHECK(classify::epoch("2026-08-16T14:30") == 1786890600);
@@ -191,10 +217,21 @@ int fetch_all(bool cold_flag) {
         bool cold = cold_flag || store.last_ok_fetch(name) == 0;
         try {
             int fresh = 0;
-            // a source that advances its own cursor mid-fetch must not outlive the inserts
+            // a source that advances its own cursor mid-fetch must not outlive the inserts, but
+            // the transaction must not span the network either — queue those writes, replay them
+            // with the inserts in one short transaction
+            store.defer = true;
+            std::vector<Item> got;
+            try {
+                got = fn();
+            } catch (...) {
+                store.drop_deferred();
+                throw;
+            }
             store.begin();
             try {
-                for (const auto &i : fn())
+                store.flush();
+                for (const auto &i : got)
                     if (store.insert_item(i)) {
                         fresh++;
                         if (!cold) fresh_kinds[i.kind]++;

@@ -51,6 +51,8 @@ const struct Default {
     {"school.avg_round", "1.5, 2.5, 3.5, 4.5", true},
     {"school.mark_scale", "1-5", true},
     {"school.points", "90, 75, 60, 40", true},
+    {"school.absence_warn", "15", true},
+    {"school.absence_max", "25", true},
 };
 
 // extra is written verbatim after the section's keys: free-form sections have no defaults

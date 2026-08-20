@@ -65,6 +65,7 @@ struct MarkRow {
 
 struct Marks {
     std::vector<MarkRow> rows;
+    std::vector<Absence> absences;  // only the subjects the rows show, alphabetical
     // {class abbrev, half-year label, weighted mean}, class-major, oldest period first
     std::vector<std::tuple<std::string, std::string, double>> averages;
 };
@@ -73,8 +74,12 @@ struct Marks {
 Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit,
                  bool consume_new = true);
 
+// filters must already be folded; with none, the blacklist applies
+std::vector<Absence> absence_rows(Store &s, const std::vector<std::string> &filters);
+
 struct Timetable {
     std::string monday;
+    bool permanent = false;  // no lessons stored for this week: the recurring grid, re-dated
     std::vector<Lesson> rows;
     std::vector<std::string> days;   // dates, display order
     std::vector<std::string> hours;  // hour numbers, ascending
@@ -95,7 +100,9 @@ struct Timetable {
         return b.empty() ? b : b + "-" + edge(hour, true);
     }
 };
-Timetable timetable(Store &s);
+// monday empty = wanted_monday(); any other week reads whatever is stored for it, and falls
+// back to the permanent grid when nothing is
+Timetable timetable(Store &s, const std::string &monday = "");
 // drop hour columns and day rows nothing occupies: a 0th hour or a long tail costs width
 void compact(Timetable &t);
 

@@ -180,6 +180,37 @@ std::string link_up(const std::string &l) {
     return o;
 }
 
+std::string style_up(const std::string &l, unsigned &open) {
+    static const struct {
+        char m;
+        const char *on;
+    } MK[] = {{'*', "1"}, {'_', "3"}, {'`', "2"}, {'~', "9"}};
+    if (!color_on()) return teams::style_strip(l);
+    auto styles = [&] {
+        std::string s;
+        for (size_t k = 0; k < sizeof MK / sizeof *MK; k++)
+            if (open & (1u << k)) s += std::string("\033[") + MK[k].on + "m";
+        return s;
+    };
+    std::string o = styles();
+    for (size_t i = 0; i < l.size(); i++) {
+        size_t k = 0;
+        for (; k < sizeof MK / sizeof *MK && MK[k].m != l[i]; k++) {}
+        if (k == sizeof MK / sizeof *MK) {
+            o += l[i];
+            continue;
+        }
+        if (open & (1u << k)) {
+            open &= ~(1u << k);
+            o += "\033[0m" + styles();  // no per-attribute off: 21/23 are not universal
+        } else {
+            open |= 1u << k;
+            o += std::string("\033[") + MK[k].on + "m";
+        }
+    }
+    return open ? o + "\033[0m" : o;
+}
+
 // "YYYY-MM-DD" through general.date; the year is only worth screen space when it is not this one
 std::string date_short(const std::string &ymd) {
     struct tm tm {};
@@ -295,7 +326,8 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
                                                       : "— overdue —"));
         }
         size_t chips = utf8_len(r.klass) + i.kind.size() + i.source.size() + 10;
-        std::vector<std::string> title = wrap(i.title, width > chips + 30 ? width - chips : 30);
+        std::vector<std::string> title =
+            wrap(teams::style_strip(i.title), width > chips + 30 ? width - chips : 30);
         p.lines.push_back((numbered ? c("90", std::to_string(r.n)) + " " : "") +
                           (r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") +
                           c("1", title.empty() ? "" : title[0] + (title.size() > 1 ? "…" : "")) +
@@ -318,12 +350,13 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
             at = end + 1;
         }
         std::string link = std::string("4;") + accent();
+        unsigned open = 0;
         for (const auto &l : wrap(rest, width)) {
             if (l.compare(0, 4, "http") == 0 && l.find(' ') == std::string::npos)
                 p.lines.push_back(c(link.c_str(), l));
             else p.lines.push_back(l == teams::TASK_NOTE  // set by teams.cpp, not a body line
                                        ? c("1;33", "<" + l + ">")
-                                       : link_up(l));
+                                       : link_up(style_up(l, open)));
         }
         if (!i.url.empty() && config().flag("general.links"))
             p.lines.push_back(c(link.c_str(), i.url));
@@ -331,6 +364,37 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
         p.url = i.url;
         p.lines.push_back("");
         out.push_back(std::move(p));
+    }
+    return out;
+}
+
+// config wins over the school's own PercentageThreshold: the limit differs per programme
+static const char *absence_color(const Absence &a) {
+    double red = config().num("school.absence_max");
+    if (red <= 0) red = a.threshold;
+    double warn = config().num("school.absence_warn");
+    if (red > 0 && a.pct() >= red) return "1;31";
+    if (warn > 0 && a.pct() >= warn) return "1;33";
+    return "39";
+}
+
+std::vector<std::string> absence_lines(const std::vector<Absence> &rows) {
+    std::vector<std::string> out;
+    size_t wc = 0, wf = 0;
+    std::vector<std::string> frac;
+    for (const Absence &a : rows) {
+        wc = std::max(wc, utf8_len(a.subject));
+        frac.push_back(std::to_string(a.absent) + "/" + std::to_string(a.lessons));
+        wf = std::max(wf, utf8_len(frac.back()));
+    }
+    std::string ac = std::string("1;") + accent();
+    for (size_t n = 0; n < rows.size(); n++) {
+        const Absence &a = rows[n];
+        char pct[16];
+        snprintf(pct, sizeof pct, "%.0f%%", a.pct());
+        out.push_back(c(ac.c_str(), a.subject + std::string(wc - utf8_len(a.subject), ' ')) + "  " +
+                      c("90", frac[n] + std::string(wf - utf8_len(frac[n]), ' ')) + "  " +
+                      c(absence_color(a), pct));
     }
     return out;
 }
@@ -358,7 +422,7 @@ std::vector<std::string> mark_lines(const view::Marks &m, size_t width) {
         }
         std::string d = r.event_at ? date_short(view::ymd_local(r.event_at)) : "";
         d.append(dw - std::min(dw, utf8_len(d)), ' ');
-        std::string note = plain_cut(r.note, width > used + 8 ? width - used : 8);
+        std::string note = plain_cut(teams::style_strip(r.note), width > used + 8 ? width - used : 8);
         while (!note.empty() && note.back() == ' ') note.pop_back();
         out.push_back((r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") + c("90", d) + "  " +
                       (wc ? c(ac.c_str(), r.klass + std::string(wc - utf8_len(r.klass), ' ')) + "  "
@@ -371,19 +435,47 @@ std::vector<std::string> mark_lines(const view::Marks &m, size_t width) {
         out.push_back(c("1;90", "average " + (multi ? k + " " : "") + p) + "  " +
                       c(avg_color(a), avg_str(a)));
     }
+    if (!m.absences.empty()) {
+        out.push_back("");
+        out.push_back(c("1;90", "absence"));
+        for (std::string &l : absence_lines(m.absences)) out.push_back(std::move(l));
+    }
     return out;
+}
+
+// the grid shows the surname, the last word of "Mgr. Ivona Vítová"; the abbrev stands in when
+// there is no name or the surname is too long to widen a column for
+std::string teacher_of(const Lesson &l) {
+    size_t sp = l.teacher_name.find_last_of(' ');
+    std::string sur = sp == std::string::npos ? l.teacher_name : l.teacher_name.substr(sp + 1);
+    return sur.empty() || utf8_len(sur) > 13 ? l.teacher : sur;
 }
 
 std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t ch, int rows,
                                     int cols, Geom &g) {
+    static const char *NOW_BG = "104;30";  // the lesson happening right now: whole cell
     static const char *DAYNAME[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
     std::string ac = std::string("1;") + accent();
     std::vector<std::string> out;
     g.nd = tt.days.size();
     g.nh = tt.hours.size();
+    bool fills = rows > 0;  // the tui owns a pane; the cli just prints the block and moves on
+    // "◂ week 17. 8. ▸": the arrows are the tui's week control, the label opens the menu, and the
+    // columns they land on go into g. a permanent grid says so — it is no promise about a date
+    bool perm_only = tt.monday == PERM_MONDAY;  // the permanent grid picked on its own
+    std::string label = perm_only ? "permanent" : "week " + date_short(tt.monday);
+    std::string header = (fills ? c("90", "◂") + " " : "") + c(ac.c_str(), label) +
+                         (fills ? " " + c("90", "▸") : "") +
+                         (tt.permanent && !perm_only ? c("1;33", "  permanent") : "");
+    if (fills) {
+        g.prev = 1;
+        g.lbl0 = 3;
+        g.lbl1 = 2 + utf8_len(label);
+        g.next = g.lbl1 + 2;
+    }
     if (!g.nd || !g.nh) {
-        out.push_back(c("90", "week ") + c(ac.c_str(), date_short(tt.monday)) +
-                      c("90", " — no lessons"));
+        g.hdr = g.left = 0;  // the header is the whole block: no centring to offset it by
+        out.push_back(header + c("90", " — no lessons"));
         return out;
     }
     // the widest cell content decides the width; vertical room decides how many lines a cell gets
@@ -392,12 +484,11 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
         if (!l) continue;
         need = std::max(need, utf8_len(l->subject));
         if (config().flag("table.room")) need = std::max(need, utf8_len(l->room));
-        if (config().flag("table.teacher")) need = std::max(need, utf8_len(l->teacher));
+        if (config().flag("table.teacher")) need = std::max(need, utf8_len(teacher_of(*l)));
     }
     TableLayout L = table_layout(tt, need + 2, (size_t)cols, g.gut);
     size_t cw = L.cw;
     size_t head = 2 + L.time_rows;
-    bool fills = rows > 0;  // the tui owns a pane; the cli just prints the block and moves on
     size_t cell_rows = 1;
     if (fills) {
         size_t avail = (size_t)rows > head ? (size_t)rows - head : 1;
@@ -428,12 +519,25 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
         for (size_t r = 1; r < hd.size(); r++)
             hd[r] += c("90", bar) + c("90", centre(r == 1 ? L.t0[h] : L.t1[h]));
     }
-    out.push_back(c("90", "week ") + c(ac.c_str(), date_short(tt.monday)));
+    out.push_back(header);
     for (const auto &h : hd) out.push_back(h + c("90", bar));
     out.push_back(c("90", rule));
     g.top = out.size();
 
     std::string today = view::ymd_local((long long)time(nullptr));
+    char nowhm[6];
+    {
+        time_t nt = time(nullptr);
+        struct tm ltm {};
+        localtime_r(&nt, &ltm);
+        snprintf(nowhm, sizeof nowhm, "%02d:%02d", ltm.tm_hour, ltm.tm_min);
+    }
+    // "8:00" and "08:00" both occur upstream; compare on minutes, not on the text
+    auto mins_of = [](const std::string &t) {
+        size_t c = t.find(':');
+        return c == std::string::npos ? -1 : atoi(t.substr(0, c).c_str()) * 60 + atoi(t.c_str() + c + 1);
+    };
+    int now_min = mins_of(nowhm);
     for (size_t d = 0; d < g.nd; d++) {
         struct tm tm {};
         time_t t = (time_t)classify::epoch(tt.days[d]);
@@ -449,9 +553,11 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
             if (l) {
                 txt[0] = l->subject;
                 if (cell_rows > 1) txt[1] = l->room;
-                if (cell_rows > 2) txt[2] = l->teacher;
+                if (cell_rows > 2) txt[2] = teacher_of(*l);
             }
             bool cur = d == cd && h == ch;
+            bool now = l && tt.days[d] == today && !l->begins.empty() && !l->ends.empty() &&
+                       mins_of(l->begins) <= now_min && now_min < mins_of(l->ends);
             std::string st = !l                ? "90"
                              : l->state == "x" ? "42;30"
                              : l->state == "!" ? "41;30"
@@ -461,7 +567,8 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
                 // terminal and still shows the state background
                 bool star = cur && r == 0 && cw > 1;
                 size_t avail = star ? cw - 1 : cw;  // the star only limits the text, never shifts it
-                std::string sgr = (cur ? "1;" : "") + (r == 0 || !l ? st : std::string("90"));
+                std::string sgr = (cur ? "1;" : "") +
+                                  (now ? std::string(NOW_BG) : r == 0 || !l ? st : std::string("90"));
                 std::string body = txt[r], room;
                 // one-line cells still carry the room, kept grey next to the subject
                 if (r == 0 && tier == 0 && l && st == "39" && L.room &&
@@ -474,6 +581,22 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
                     n = avail;
                 }
                 size_t lead = (cw - n) / 2, trail = cw - n - lead - (star ? 1 : 0);
+                // a one-line cell that is both running and cancelled/changed: left half in the
+                // now colour, right half in the state colour, so neither fact is lost
+                if (now && cell_rows == 1 && !l->state.empty()) {
+                    std::string full =
+                        std::string(lead, ' ') + body + std::string(trail, ' ') + (star ? "*" : "");
+                    size_t half = cw / 2, vis = 0, i = 0;
+                    while (i < full.size() && vis < half) {
+                        for (i++; i < full.size() && ((unsigned char)full[i] & 0xC0) == 0x80; i++) {}
+                        vis++;
+                    }
+                    std::string hs = (cur ? "1;" : "") + std::string(NOW_BG);
+                    std::string ts = (cur ? "1;" : "") + st;
+                    block[r] += c("90", bar) + c(hs.c_str(), full.substr(0, i)) +
+                                c(ts.c_str(), full.substr(i));
+                    continue;
+                }
                 block[r] += c("90", bar) + c(sgr.c_str(), std::string(lead, ' ') + body) +
                             (room.empty() ? "" : c("90", " " + room)) +
                             c(sgr.c_str(), std::string(trail, ' ') + (star ? "*" : ""));
@@ -493,6 +616,11 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
         for (auto &line : out) line = std::string(g.left, ' ') + line;
     out.insert(out.begin(), pad, std::string());
     g.top += pad;
+    g.hdr = pad;
+    g.prev += g.left;
+    g.lbl0 += g.left;
+    g.lbl1 += g.left;
+    g.next += g.left;
     return out;
 }
 
