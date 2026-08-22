@@ -1,7 +1,7 @@
 # mail
 
-Read-only aggregator for school systems. `maild` fetches Bakaláři and MS Teams from cron
-into a local sqlite db; `mailc` prints from that db, `mailt` browses it in the terminal.
+Read-only aggregator for school systems. `maild` fetches Bakaláři, MS Teams and the school
+Outlook mailbox from cron into a local sqlite db; `mailc` prints from that db, `mailt` browses it in the terminal.
 
 Everything is local. No server, no cloud, no AI.
 
@@ -10,11 +10,16 @@ Everything is local. No server, no cloud, no AI.
 > Microsoft client id, built against an account with no Entra app registration rights.
 > Microsoft's [APIs Terms of Use](https://learn.microsoft.com/en-us/legal/microsoft-apis/terms-of-use)
 > license API access only for an app you register yourself (§2.b, §3.a), so this may
-> breach them, and your school may block it. Your call, your responsibility. No warranty.
+> breach them, and your school may block it. Outlook rides the same token. Your call,
+> your responsibility. No warranty.
 
-## Build
+## Install
 
-    ./install.sh    # deps check, build, install, optional crontab entry
+    curl -fsSL https://raw.githubusercontent.com/darealhoks/mail/main/install.sh | sh
+
+Runs from anywhere: clones to a temp dir, checks deps, builds, installs to `~/.local/bin`,
+offers a crontab entry. `NAME=`, `PREFIX=` and `REPO=` override. Inside a checkout,
+`./install.sh` does the same without cloning.
 
 or by hand:
 
@@ -52,10 +57,15 @@ when `maild` writes. Rebind the tabs in the config (`key.<char> = feed|marks|tim
 
 First run:
 
-    ./install.sh
     mailc auth bakalari          # asks for the url, then username and password
     mailc auth teams             # device-code sign-in in a browser
     maild                        # first fetch
+
+The school mailbox is off by default; `[source.outlook] enabled = yes` turns it on. It
+reuses the Teams sign-in — no second login. `sync` picks how much it pulls: `recent`
+(default, unread mail newer than `recent_days`), `unread`, or `all`; the last two do an
+unbounded first sweep and refuse to fetch until `mailc auth outlook` shows the mail count
+and you answer y.
 
 `~/.config/mail/config` is written with commented defaults on first run; every key is
 documented in `.map/config.md`.
@@ -63,7 +73,7 @@ documented in `.map/config.md`.
 ## Layout
 
     src/core/     store config creds http oauth json notify
-    src/sources/  bakalari teams classify + registry
+    src/sources/  bakalari teams outlook classify + registry
     src/view/     store rows -> render structs
     src/maild/    oneshot fetch, notify
     src/cli/      argv, layout, colors

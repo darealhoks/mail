@@ -9,7 +9,21 @@ die() { printf "${R}!!${N} %s\n" "$1" >&2; exit 1; }
 
 NAME=${NAME:-mail}
 PREFIX=${PREFIX:-$HOME/.local}
+REPO=${REPO:-https://github.com/darealhoks/mail.git}
 MAKE=$(command -v gmake || command -v make) || die "no make"
+
+# piped from curl: stdin is the script itself, prompts must come from the terminal
+if [ ! -t 0 ] && (exec 0</dev/tty) 2>/dev/null; then exec 0</dev/tty; fi
+ask() { [ -t 0 ] || return 1; printf "${Y}?${N} %s" "$1"; read -r REPLY; }
+
+if [ ! -f Makefile ] || [ ! -d src ]; then
+    command -v git >/dev/null 2>&1 || die "no git, and not in a checkout"
+    src=$(mktemp -d) || die "mktemp failed"
+    trap 'rm -rf "$src"' EXIT INT TERM
+    say "cloning $REPO"
+    git clone --depth 1 "$REPO" "$src/mail" >/dev/null 2>&1 || die "clone failed: $REPO"
+    cd "$src/mail"
+fi
 
 say "checking dependencies"
 missing=
@@ -28,10 +42,10 @@ printf "${G}ok${N} %sd %sc %st installed\n" "$NAME" "$NAME" "$NAME"
 
 cron() {
     command -v crontab >/dev/null 2>&1 || return 0
-    printf "${Y}?${N} add a crontab entry for %sd? [y/N] " "$NAME"; read -r a
-    case $a in [yY]*) ;; *) return 0;; esac
-    printf "${Y}?${N} run every how many minutes? [15] "; read -r m
-    [ -n "${m:-}" ] || m=15
+    ask "add a crontab entry for ${NAME}d? [y/N] " || return 0
+    case $REPLY in [yY]*) ;; *) return 0;; esac
+    ask "run every how many minutes? [15] " || REPLY=15
+    m=${REPLY:-15}
     case $m in *[!0-9]*|'') die "not a number: $m";; esac
     old=$(crontab -l 2>/dev/null | grep -v "/${NAME}d\$" || true)
     line="*/$m * * * * $PREFIX/bin/${NAME}d"
