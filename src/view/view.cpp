@@ -14,12 +14,12 @@
 namespace view {
 namespace {
 
-// fallback threshold when no daemon has ever published a poll rate (cron, manual runs)
+// fallback threshold when the poll rate is unset
 const long long STALE_AFTER = 6 * 3600;
 
 // one skipped tick is jitter, two means nobody is fetching
-long long stale_after(Store &s) {
-    long long iv = atoll(s.get_state("daemon.interval").c_str());
+long long stale_after() {
+    long long iv = config().num("general.interval");
     return iv ? iv * 2 : STALE_AFTER;
 }
 
@@ -347,10 +347,10 @@ std::vector<SourceStatus> status(Store &s) {
         st.pretty = src.pretty;
         st.error = src.session_error();
         st.signed_in = src.have_session();
-        if (st.signed_in && st.error.empty()) st.refreshed_at = oauth::last_refresh_at(src.name);
+        if (st.signed_in && st.error.empty()) st.refreshed_at = oauth::last_refresh_at(src.creds);
         st.fetched_at = s.last_ok_fetch(src.name);
         st.offline = off;
-        st.stale = !st.fetched_at || stale_age(st.fetched_at) > stale_after(s);
+        st.stale = !st.fetched_at || stale_age(st.fetched_at) > stale_after();
         out.push_back(std::move(st));
     }
     return out;
@@ -358,8 +358,9 @@ std::vector<SourceStatus> status(Store &s) {
 
 std::vector<Gripe> gripes(Store &s) {
     std::vector<Gripe> out;
-    if (offline(s)) return {{"no internet, showing last data", false}};
-    long long limit = stale_after(s), iv = atoll(s.get_state("daemon.interval").c_str());
+    bool off = offline(s);
+    if (off) out.push_back({"no internet, showing last data", false});
+    long long limit = stale_after(), iv = config().num("general.interval");
     std::string rate = iv ? " (" + dur(iv) + ")" : "";
     for (const Source &source : sources()) {
         const char *src = source.name;
@@ -369,6 +370,7 @@ std::vector<Gripe> gripes(Store &s) {
                 out.push_back({std::string(src) + ": never fetched, is " APP_NAME "d running?",
                                false});
         } else if (!f.ok) {
+            if (off && f.error.rfind(OFFLINE_TAG, 0) == 0) continue;  // the one line above says it
             out.push_back({std::string(src) + ": fetch failing since " +
                                ago(f.failing_since ? f.failing_since : f.at) +
                                (f.error.empty() ? "" : " — " + f.error),

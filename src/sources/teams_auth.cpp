@@ -70,7 +70,8 @@ void device_poll(const DeviceCode &dc) {
         throw std::runtime_error("teams: sign-in failed (" + (err.empty() ? "http " + std::to_string(r.status) : err) +
                                  ": " + j.str("error_description") + ")");
     }
-    throw std::runtime_error("teams: device code expired before sign-in completed");
+    throw std::runtime_error("teams: device code expired before sign-in completed; run "
+                             APP_NAME "c auth teams again");
 }
 
 std::string access_token() {
@@ -126,9 +127,10 @@ void print_qr(const std::string &text) {
 int login_interactive() {
     DeviceCode dc = device_start();
     // no prefill: v2.0 devicecode returns no verification_uri_complete and ?otc= is ignored
-    printf("%s\n%s\n%s %s\n\n", c("1", "to sign in, open:").c_str(),
+    printf("%s\n%s\n%s %s %s\n\n", c("1", "to sign in, open:").c_str(),
            c("4;36", dc.verification_uri).c_str(), c("1", "and enter code:").c_str(),
-           c("1;33", dc.user_code).c_str());
+           c("1;33", dc.user_code).c_str(),
+           c("90", "(valid for " + std::to_string(dc.expires_in / 60) + "m)").c_str());
     print_qr(qr_upper(dc.verification_uri));
     puts(c("90", "waiting for sign-in...").c_str());
     fflush(stdout);  // device_poll blocks for minutes; don't sit in a pipe buffer

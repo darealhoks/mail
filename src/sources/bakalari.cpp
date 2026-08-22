@@ -101,6 +101,9 @@ std::string ymd(long long t) {
 
 const long long DAY = 86400;
 
+// the web ui has no per-item deep links, only module pages; base()+path is as close as it gets
+std::string web(const char *page) { return base() + "/next/" + page; }
+
 // every timetable payload (actual and permanent alike) ships the same five side tables
 struct Side {
     std::map<std::string, std::string> subject, subject_name, room, hour, begins, ends, teacher,
@@ -220,7 +223,8 @@ std::vector<Item> fetch(Store &store) {
             i.klass = trim(s(e.at_key("Subject"), "Abbrev"));
             i.body = teams::plain_text(s(e, "Content"));
             i.title = i.body.substr(0, i.body.find('\n'));
-            i.due_at = classify::epoch(s(e, "DateEnd"));
+            i.due_at = classify::due_epoch(s(e, "DateEnd"));
+            i.url = web("vyuka.aspx");
             i.src_uid = "hw:" + id;
             out.push_back(std::move(i));
         }
@@ -246,6 +250,7 @@ std::vector<Item> fetch(Store &store) {
                 i.event_at = classify::epoch(s(m, "MarkDate"));
                 long w = strtol(s(m, "Weight").c_str(), nullptr, 10);
                 i.weight = (int)std::clamp(w, 1L, 100L);
+                i.url = web("prubzna.aspx");
                 i.src_uid = "mark:" + id;
                 out.push_back(std::move(i));
             }
@@ -276,8 +281,9 @@ std::vector<Item> fetch(Store &store) {
             std::string sent = s(e, "SentDate");
             classify::Result c = classify::run(i.title + " || " + i.body, false, sent);
             i.kind = classify::kind(c);
-            i.due_at = classify::epoch(c.deadline);
+            i.due_at = classify::due_epoch(c.deadline);
             i.event_at = classify::epoch(sent);
+            i.url = web("komens.aspx");
             i.src_uid = "komens:" + id;
             out.push_back(std::move(i));
         }
@@ -315,6 +321,7 @@ std::vector<Item> fetch(Store &store) {
                 i.title = desc.empty() ? what : what + ": " + desc;
                 i.body = trim(s(ch, "Hours") + " " + s(ch, "Time"));
                 i.event_at = classify::epoch(date);
+                i.url = base() + "/timetable";  // the only module not under /next/*.aspx
                 i.src_uid = "tt:" + date.substr(0, 10) + ":" + s(at, "HourId") + ":" + type;
                 out.push_back(std::move(i));
             }
@@ -384,6 +391,7 @@ std::vector<Item> fetch(Store &store) {
                 if (!times.error() && times.value().size()) start = s(times.value().at(0), "StartTime");
             }
             i.event_at = classify::epoch(start);
+            i.url = web("planakci.aspx");
             i.src_uid = "event:" + id;
             out.push_back(std::move(i));
         }

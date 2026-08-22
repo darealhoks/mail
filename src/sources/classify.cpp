@@ -295,6 +295,26 @@ long long epoch(const std::string &iso) {
     return t;
 }
 
+long long due_epoch(const std::string &iso) {
+    struct tm tm {};
+    if (iso.size() < 10 || !strptime(iso.substr(0, 10).c_str(), "%Y-%m-%d", &tm)) return 0;
+    tm.tm_hour = 23;
+    tm.tm_min = tm.tm_sec = 59;
+    if (iso.size() >= 16 && iso[10] == 'T') {
+        long long h = strtoll(iso.c_str() + 11, nullptr, 10);
+        long long mi = strtoll(iso.c_str() + 14, nullptr, 10);
+        if (h >= 0 && h <= 23 && mi >= 0 && mi <= 59) {
+            tm.tm_hour = (int)h;
+            tm.tm_min = (int)mi;
+            tm.tm_sec = 0;
+        }
+    }
+    tm.tm_isdst = -1;
+    time_t t = mktime(&tm);
+    if (t == (time_t)-1) return 0;
+    return (long long)t;
+}
+
 std::string norm(const std::string &s) {
     std::string o;
     o.reserve(s.size());

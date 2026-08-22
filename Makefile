@@ -4,7 +4,8 @@ CXXFLAGS ?= -O2
 CXXFLAGS += -std=c++20 -Wall -Wextra -Wshadow -Wconversion -Wswitch-enum -Wnull-dereference
 GCCONLY = -Wlogical-op -Wduplicated-cond -Wduplicated-branches  # clang has none of these
 CXXFLAGS += $(shell $(CXX) --version 2>/dev/null | grep -qi clang || echo $(GCCONLY))
-CPPFLAGS += -DAPP_NAME='"$(NAME)"' -Isrc/core -Isrc/sources -Isrc/view
+VERSION ?= 0.1
+CPPFLAGS += -DAPP_NAME='"$(NAME)"' -DVERSION='"$(VERSION)"' -Isrc/core -Isrc/sources -Isrc/view
 DEV ?= 1
 ifeq ($(DEV),1)
 CXXFLAGS += -Werror

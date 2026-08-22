@@ -2,6 +2,7 @@
 
 #include "bakalari.h"
 #include "config.h"
+#include "outlook.h"
 #include "teams.h"
 #include "teams_auth.h"
 
@@ -9,21 +10,14 @@ namespace {
 
 std::string bakalari_error() { return bakalari::have_session() ? "" : "not signed in"; }
 
-// teams holds a refresh token that upstream can reject; probing it is the only real check
-std::string teams_error() {
-    if (!teams::have_session()) return "not signed in";
-    try {
-        teams::access_token();
-    } catch (const SessionExpired &e) {
-        return e.what();
-    }
-    return "";
-}
-
+// teams and outlook share one refresh token, so they share one probe
 const Source ALL[] = {
-    {"bakalari", "Bakaláři", bakalari::have_session, bakalari_error, bakalari::fetch,
-     bakalari::login_interactive},
-    {"teams", "Teams", teams::have_session, teams_error, teams::fetch, teams::login_interactive},
+    {"bakalari", "Bakaláři", "bakalari", bakalari::have_session, bakalari_error, bakalari::fetch,
+     bakalari::login_interactive, nullptr},
+    {"teams", "Teams", "teams", teams::have_session, outlook::session_error, teams::fetch,
+     teams::login_interactive, &teams::progress},
+    {"outlook", "Outlook", "teams", outlook::have_session, outlook::session_error, outlook::fetch,
+     outlook::login_interactive, nullptr},
 };
 
 }  // namespace

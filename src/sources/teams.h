@@ -1,11 +1,22 @@
 #pragma once
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "store.h"
 
 namespace teams {
+
+struct GraphError : std::runtime_error {
+    GraphError(long s, const std::string &m) : std::runtime_error(m), status(s) {}
+    long status;
+};
+
+// graph GET with retry, 401-remint and paging left to the caller; shared with outlook,
+// which rides the same token
+std::string graph_get(std::string &token, const std::string &url,
+                      const std::vector<std::string> &extra_headers = {});
 
 // appended to task-bot posts, whose real text graph will not give us (.map/sources.md);
 // frontends render it as a marker, not as body text

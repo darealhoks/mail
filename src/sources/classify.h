@@ -18,6 +18,9 @@ inline std::string kind(const Result &r) { return r.test ? "test" : r.task ? "ta
 // "YYYY-MM-DD[THH:MM]" / rfc3339 -> epoch, 0 if unparseable
 long long epoch(const std::string &iso);
 
+// same input as a deadline: local end-of-day when date-only, else the local wall time given
+long long due_epoch(const std::string &iso);
+
 // exposed for selfcheck
 std::string norm(const std::string &s);
 

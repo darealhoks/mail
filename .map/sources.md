@@ -8,7 +8,7 @@ put_absences) queue in memory and are replayed by flush() inside the insert tran
 A throw mid-fetch drops the queue, so a source's cursor advance never outlives its items.
 Consequence for sources: get_state does not see a set_state made earlier in the same fetch.
 
-Registry: `src/sources/registry.h` — `Source{name, pretty, have_session, session_error,
+Registry: `src/sources/registry.h` — `Source{name, pretty, creds, have_session, session_error,
 fetch, login}` and `sources()`, the built-in list filtered by `[source.<name>] enabled`.
 `source(name)` looks one up (nullptr when unknown or disabled). Both binaries only iterate
 it: nothing names a source longhand. A disabled source is invisible everywhere — no fetch,
@@ -82,3 +82,26 @@ no status line, no gripe, no sign-in prompt.
   (teams 1fec8e78, office d3590ed6); neither is preauthorized for EduAssignments.* and
   AADSTS65002 blocks asking for it. would need entra admin consent
 - most fragile source: expect token/endpoint churn, log loudly
+- `teams::graph_get` is the shared graph transport (retry, 401-remint, `GraphError.status`);
+  outlook calls it and rides the same token, hence `creds = "teams"` on its registry row
+
+## outlook
+
+- school mailbox over the same graph token as teams; no second sign-in, no second client id.
+  `Mail.Read` is in client 1fec8e78's preauthorized set (checked live 2026-08-20)
+- `GET /me/mailFolders/inbox/messages/delta`, deltaLink in state `outlook.delta`, same shape
+  as a teams channel. `$top` is ignored here — page size comes from `Prefer: odata.maxpagesize`
+- delta takes `$filter` on receivedDateTime ONLY; `isRead` 400s, so unread is filtered
+  client-side. `$deltatoken=latest` is ignored too (it pages the whole folder), so there is
+  no cheap way to grab a cursor without a sweep
+- sync modes (`[source.outlook] sync`): recent (default, unread mail newer than recent_days),
+  unread (every unread mail), all (the whole inbox). recent is the only bounded cold run;
+  the other two refuse to fetch until `mailc auth outlook` prints the mail count and gets a
+  y, which records the mode in state `outlook.cold_ok`
+- a read mail never enters the store under recent/unread: read = already dealt with. the
+  store holds what is still open, so old mail is absent rather than present-and-dismissed
+- body is graph's `bodyPreview` (255 chars, already plain); the full body is html and costs
+  a fetch each. `hasAttachments` appends the ` [att]` marker, names are not fetched
+- class = sender display name, else the address. kind/due from the classifier, which was
+  tuned on teams posts — mail is out-of-domain for it, expect info to dominate
+- src_uid `mail:<id>`, url = webLink

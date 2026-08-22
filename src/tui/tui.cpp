@@ -103,12 +103,15 @@ std::string tabs(Mode mode, const std::map<char, Mode> &keys, size_t &width_used
         if (compact) name = std::string(1, hot ? hot : name[0]);
         size_t p = m == mode || !hot ? std::string::npos : name.find(hot);
         hits[m] = {width_used + 1, width_used + name.size() + 2};
+        // no colour: brackets are the only mark of the active tab. same width as the pad spaces
+        std::string lp = " ", rp = " ";
+        if (m == mode && !color_on()) lp = "[", rp = "]";
         if (p == std::string::npos)
-            out += c(base.c_str(), " " + name + " ");
+            out += c(base.c_str(), lp + name + rp);
         else
-            out += c(base.c_str(), " " + name.substr(0, p)) +
+            out += c(base.c_str(), lp + name.substr(0, p)) +
                    c((base + ";4").c_str(), name.substr(p, 1)) +
-                   c(base.c_str(), name.substr(p + 1) + " ");
+                   c(base.c_str(), name.substr(p + 1) + rp);
         width_used += name.size() + 2;
     }
     return out;
@@ -148,7 +151,8 @@ std::string age_chip(Store &s, bool &red, long long &best) {
 void auth_all() {
     leave();
     for (const Source &src : sources()) {
-        while (!src.have_session() || !src.session_error().empty()) {
+        for (int tries = 0; tries < 3 && (!src.have_session() || !src.session_error().empty());
+             tries++) {
             fputs("\033[H\033[2J", stdout);
             try {
                 if (src.login() != 0) break;  // empty input backs out of this source
@@ -186,7 +190,7 @@ std::string status(Mode mode, const std::map<char, Mode> &keys, const std::strin
                    const std::string &age_in, bool age_red, const std::string &pos, size_t width,
                    std::vector<std::pair<size_t, size_t>> &hits,
                    std::vector<std::pair<size_t, size_t>> &chips) {
-    std::string m = msg, age = age_in;
+    std::string m = msg, age = age_in, hint = "? keys";
     size_t tw = 0;
     std::string strip;
     auto build = [&](bool compact) {
@@ -199,14 +203,17 @@ std::string status(Mode mode, const std::map<char, Mode> &keys, const std::strin
         }
     };
     build(false);
-    // narrow terminal: shed the message, then the tab names, then the age chip, in that order
+    // narrow terminal: shed the hint, then the tab names, then the message, then the age chip.
+    // the gripe outlives the tab names: staleness is never hidden
     size_t used;
     for (bool compact = false;;) {
         // +1 for the space before the gap, +1 for the pad that keeps the chip off the last column
-        used = tw + (m.empty() ? 0 : utf8_len(m) + 1) + 1 + utf8_len(age) + 1 + utf8_len(pos) + 2 + 1;
+        used = tw + (m.empty() ? 0 : utf8_len(m) + 1) + (hint.empty() ? 0 : utf8_len(hint) + 1) +
+               1 + utf8_len(age) + 1 + utf8_len(pos) + 2 + 1;
         if (used <= width) break;
-        if (!m.empty()) m.clear();
+        if (!hint.empty()) hint.clear();
         else if (!compact) build(compact = true);
+        else if (!m.empty()) m.clear();
         else if (!shorten_age(age)) break;
     }
     std::string gap(used < width ? width - used : 0, ' ');
@@ -215,6 +222,7 @@ std::string status(Mode mode, const std::map<char, Mode> &keys, const std::strin
     std::string sep = fill.empty() ? "" : ";" + fill;
     std::string msg_sgr = m.empty() ? "90" : msg_col;
     return fit(strip + c((msg_sgr + sep).c_str(), (m.empty() ? "" : " " + m) + " " + gap) +
+                   c(("90" + sep).c_str(), hint.empty() ? "" : hint + " ") +
                    c(((age_red ? "1;31" : "90") + sep).c_str(), age + " ") +
                    c(("1;" + std::string(accent()) + sep).c_str(), " " + pos + " ") +
                    c(("90" + sep).c_str(), " "),
@@ -367,12 +375,19 @@ std::vector<std::string> help_body(const std::map<char, Mode> &keys) {
             if (md == m) modes += std::string(1, ch) + " " + MODE_NAME[m] + "   ";
     return {modes,
             "tab / shift-tab  next / previous tab",
-            "j k g G arrows   move",
-            "enter            open link / open subject",
-            "/                filter, empty clears",
-            "x                dismiss the item",
+            "j k arrows       move",
+            "g G home end     first / last",
+            "space ^d ^u      half screen down / up (not table)",
+            "pgup pgdn        screen up / down",
+            "/ esc            filter, clear the filters",
+            "enter            feed: open link   marks: open subject",
+            "X                feed: dismiss the item",
+            "h l left right   marks: back / open   table: hour",
+            "space enter      table: lesson detail",
             "[ ] w            table: week back, forward, menu",
-            "a r q            sign in, refresh, quit"};
+            "mouse            click a tab, chip or week arrow,",
+            "                 double click to open, wheel scrolls",
+            "? a r q ^c       keys, sign in, refresh, quit, quit"};
 }
 
 // a painted line with its sgr escapes dropped, for locating chips by column
@@ -851,8 +866,10 @@ int main(int argc, char **argv) {
             if (fmode)
                 out += c((std::string("1;") + accent()).c_str(), "/") + fbuf + "\033[7m \033[0m\033[K";
             else
-                out += status(mode, keys, line, msg_col, filters, age, age_red, pos, (size_t)cols,
-                              tab_hits, chip_hits);
+                // the grid is unfiltered, so no chips there: view::timetable never sees filters
+                out += status(mode, keys, line, msg_col,
+                              mode == M_TABLE ? std::vector<std::string>{} : filters, age, age_red,
+                              pos, (size_t)cols, tab_hits, chip_hits);
             if (mode == M_TABLE && pop && !tt.grid.empty() && tt.at(cd, chr))
                 out += lesson_popup(*tt.at(cd, chr), rows, cols);
             if (mode == M_TABLE && menu) {
@@ -960,7 +977,7 @@ int main(int argc, char **argv) {
                     pop = false;
                     relayout = true;
                 };
-                if (e.ch == 'q' || e.ch == 3) {
+                if (e.ch == 3) {
                     quit = true;
                     break;
                 }
@@ -979,13 +996,25 @@ int main(int argc, char **argv) {
                     continue;
                 }
                 if (pop || help_pop) {  // any key dismisses a popup, and does nothing else
+                    // not the release of the double-click that opened it
+                    if (e.mouse && e.fin != 'M') continue;
                     pop = help_pop = false;
                     pending.clear();
                     break;
                 }
+                if (e.ch == 'q') {
+                    quit = true;
+                    break;
+                }
+                if (e.ch == 27 && !filters.empty()) {
+                    filters.clear();
+                    refilter();
+                    continue;
+                }
                 if (e.ch == '/') {
                     fmode = true;
                     fbuf.clear();
+                    for (const std::string &f : filters) fbuf += (fbuf.empty() ? "" : " ") + f;
                     continue;
                 }
                 if (e.ch == '?') {
@@ -1036,6 +1065,7 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
+                long half = rows > 1 ? rows / 2 : 1, page = rows > 1 ? rows : 1;
                 if (mode == M_FEED) {
                     auto open_sel = [&] {
                         if (posts.empty()) return;
@@ -1052,7 +1082,7 @@ int main(int argc, char **argv) {
                                                                  : v);
                     };
                     if (e.ch == '\r' || e.ch == '\n') open_sel();
-                    else if (e.ch == 'x' && !posts.empty()) {
+                    else if (e.ch == 'X' && !posts.empty()) {
                         store.dismiss({fsnap.items[fsnap.rows[sel].n - 1].id});
                         msg = "dismissed";
                         msg_at = now_ms();
@@ -1063,14 +1093,23 @@ int main(int argc, char **argv) {
                     else if (e.ch == 'k' || e.fin == 'A') move(-1);
                     else if (e.ch == 'g' || e.fin == 'H') sel = 0;
                     else if (e.ch == 'G' || e.fin == 'F') move((long)posts.size());
-                    else if (e.fin == '~' && e.seq == "5") move(-5);
-                    else if (e.fin == '~' && e.seq == "6") move(5);
+                    else if (e.ch == ' ' || e.ch == 4) move(half);
+                    else if (e.ch == 21) move(-half);
+                    else if (e.fin == '~' && e.seq == "5") move(-page);
+                    else if (e.fin == '~' && e.seq == "6") move(page);
                     else if (e.mouse && e.btn == 64) move(-1);
                     else if (e.mouse && e.btn == 65) move(1);
                     else if (e.mouse && e.btn == 0 && e.fin == 'M') {
                         size_t li = top + (size_t)(e.my - 1);
                         if (li >= flat.size()) continue;
                         sel = owner[li];
+                        // feed_posts puts every url on a line of its own: click it, open it
+                        std::string u = trim(plain(flat[li]));
+                        if (u.compare(0, 4, "http") == 0 && u.find(' ') == std::string::npos) {
+                            msg = open_url(u) == 0 ? "opened in browser" : "open failed";
+                            msg_at = now_ms();
+                            continue;
+                        }
                         // the title line carries the <class> chip: click it to filter by class
                         size_t hdr = start[sel] + (sel && fsnap.rows[sel].bucket ==
                                                               fsnap.rows[sel - 1].bucket ? 0 : 1);
@@ -1127,8 +1166,10 @@ int main(int argc, char **argv) {
                     else if (e.ch == 'k' || e.fin == 'A') move(-1);
                     else if (e.ch == 'g' || e.fin == 'H') (list ? msel : mtop) = 0;
                     else if (e.ch == 'G' || e.fin == 'F') move(1 << 20);
-                    else if (e.fin == '~' && e.seq == "5") move(-5);
-                    else if (e.fin == '~' && e.seq == "6") move(5);
+                    else if (e.ch == ' ' || e.ch == 4) move(half);
+                    else if (e.ch == 21) move(-half);
+                    else if (e.fin == '~' && e.seq == "5") move(-page);
+                    else if (e.fin == '~' && e.seq == "6") move(page);
                     else if (e.mouse && e.btn == 64) move(-1);
                     else if (e.mouse && e.btn == 65) move(1);
                     else if (e.mouse && e.btn == 0 && e.fin == 'M' && list) {
@@ -1153,8 +1194,10 @@ int main(int argc, char **argv) {
                     else if (e.ch == 'k' || e.fin == 'A') move(-1);
                     else if (e.ch == 'g' || e.fin == 'H') atop = 0;
                     else if (e.ch == 'G' || e.fin == 'F') move(1 << 20);
-                    else if (e.fin == '~' && e.seq == "5") move(-5);
-                    else if (e.fin == '~' && e.seq == "6") move(5);
+                    else if (e.ch == ' ' || e.ch == 4) move(half);
+                    else if (e.ch == 21) move(-half);
+                    else if (e.fin == '~' && e.seq == "5") move(-page);
+                    else if (e.fin == '~' && e.seq == "6") move(page);
                     else if (e.mouse && e.btn == 64) move(-1);
                     else if (e.mouse && e.btn == 65) move(1);
                 } else {
@@ -1173,6 +1216,11 @@ int main(int argc, char **argv) {
                     else if (e.ch == 'l' || e.fin == 'C') mvd(0, 1);
                     else if (e.ch == 'h' || e.fin == 'D') mvd(0, -1);
                     else if (e.ch == 'g' || e.fin == 'H') cd = chr = 0;
+                    else if (e.ch == 'G' || e.fin == 'F') mvd((long)nd, 0);
+                    else if (e.fin == '~' && e.seq == "5")
+                        mvd(-(geom.blk ? std::max<long>(1, rows / (long)geom.blk) : 1), 0);
+                    else if (e.fin == '~' && e.seq == "6")
+                        mvd(geom.blk ? std::max<long>(1, rows / (long)geom.blk) : 1, 0);
                     else if (e.ch == '[') set_week(step(-7));
                     else if (e.ch == ']') set_week(step(7));
                     else if (e.ch == 'w') {

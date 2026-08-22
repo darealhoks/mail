@@ -13,6 +13,7 @@ Schema in src/core/store.cpp; creds in <data_dir>/creds/<source> as key=value li
     legacy rows are migrated on open: ukol -> task, message -> info
 - fetch_log(source, started_at, finished_at, ok, error, items_new)
   - staleness = now - last ok fetch per source; frontends must show it past a threshold
+  - trimmed to the last 500 rows per source on every log_fetch
 - lessons(source, date, hour, subject, subject_name, room, teacher, state, begins, ends,
   teacher_name, change)
   - primary key (source, date, hour); date "YYYY-MM-DD", hour the api caption ("1"), begins/ends

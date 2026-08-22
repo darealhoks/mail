@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS fetch_log(
   items_new INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS fetch_log_source ON fetch_log(source, finished_at);
+CREATE INDEX IF NOT EXISTS fetch_log_ok ON fetch_log(source, ok, id);
 CREATE TABLE IF NOT EXISTS state(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -66,7 +67,7 @@ CREATE TABLE IF NOT EXISTS absences(
 
 #define STR_(x) #x
 #define STR(x) STR_(x)
-constexpr int SCHEMA_VERSION = 3;
+constexpr int SCHEMA_VERSION = 4;
 
 void exec(sqlite3 *db, const char *sql) {
     char *err = nullptr;
@@ -75,6 +76,14 @@ void exec(sqlite3 *db, const char *sql) {
         sqlite3_free(err);
         throw std::runtime_error("store: " + m);
     }
+}
+
+void add_column(sqlite3 *db, const char *sql) {
+    char *err = nullptr;
+    if (sqlite3_exec(db, sql, nullptr, nullptr, &err) == SQLITE_OK) return;
+    std::string m = err ? err : "sqlite error";
+    sqlite3_free(err);
+    if (m.find("duplicate column") == std::string::npos) throw std::runtime_error("store: " + m);
 }
 
 int user_version(sqlite3 *db) {
@@ -135,13 +144,10 @@ Store::Store(const std::string &path) {
     // write lock and fail against a fetching maild. bump with any SCHEMA/migration change
     if (user_version(db) < SCHEMA_VERSION) {
         exec(db, SCHEMA);
-        // pre-weight databases: fails harmlessly once the column exists
-        sqlite3_exec(db, "ALTER TABLE items ADD COLUMN weight INTEGER NOT NULL DEFAULT 1", nullptr,
-                     nullptr, nullptr);
-        sqlite3_exec(db, "ALTER TABLE lessons ADD COLUMN teacher_name TEXT NOT NULL DEFAULT ''",
-                     nullptr, nullptr, nullptr);
-        sqlite3_exec(db, "ALTER TABLE lessons ADD COLUMN change TEXT NOT NULL DEFAULT ''", nullptr,
-                     nullptr, nullptr);
+        // pre-weight/pre-change databases: the column already existing is the only tolerated error
+        add_column(db, "ALTER TABLE items ADD COLUMN weight INTEGER NOT NULL DEFAULT 1");
+        add_column(db, "ALTER TABLE lessons ADD COLUMN teacher_name TEXT NOT NULL DEFAULT ''");
+        add_column(db, "ALTER TABLE lessons ADD COLUMN change TEXT NOT NULL DEFAULT ''");
         exec(db, "UPDATE items SET kind='task' WHERE kind='ukol'");
         exec(db, "UPDATE items SET kind='info' WHERE kind='message'");
         // drops the old '<source>.tt.<monday>' grid blobs; the lessons table replaced them
@@ -231,6 +237,16 @@ void Store::log_fetch(const std::string &source, long long started_at, bool ok,
     bind_text(s, 4, error);
     sqlite3_bind_int(s, 5, items_new);
     int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
+
+    // ~35k rows/source/year at the cron rate; nothing reads past the last outage
+    const char *trim = "DELETE FROM fetch_log WHERE source=?1 AND id <= (SELECT id FROM fetch_log"
+                       " WHERE source=?1 ORDER BY id DESC LIMIT 1 OFFSET 500)";
+    if (sqlite3_prepare_v2(db, trim, -1, &s, nullptr) != SQLITE_OK)
+        throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
+    bind_text(s, 1, source);
+    rc = sqlite3_step(s);
     sqlite3_finalize(s);
     if (rc != SQLITE_DONE) throw std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
 }
@@ -459,8 +475,12 @@ std::vector<Item> Store::feed(long long since) {
     sqlite3_stmt *s = nullptr;
     std::string sql = std::string(COLS) +
                       "WHERE dismissed=0 AND kind<>'mark' AND id>?"
+                      // 30 days: a term of undismissed homework otherwise buries today
+                      " AND (COALESCE(due_at,0)=0 OR due_at > strftime('%s','now')-2592000)"
                       " ORDER BY CASE WHEN COALESCE(due_at,0)=0 THEN 0"
                       "   WHEN due_at>=strftime('%s','now') THEN 1 ELSE 2 END,"
+                      " CASE WHEN COALESCE(due_at,0)=0"
+                      "   THEN (CASE WHEN kind IN ('task','test') THEN 1 ELSE 0 END) ELSE 0 END,"
                       " CASE WHEN COALESCE(due_at,0)=0 THEN COALESCE(event_at,fetched_at)"
                       "   WHEN due_at>=strftime('%s','now') THEN -due_at ELSE due_at END, id";
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, &s, nullptr) != SQLITE_OK)

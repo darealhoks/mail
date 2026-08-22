@@ -44,6 +44,9 @@ const struct Default {
     {"source.bakalari.enabled", "yes", true},
     {"source.bakalari.client_id", "ANDR", false},
     {"source.teams.enabled", "yes", true},
+    {"source.outlook.enabled", "no", true},
+    {"source.outlook.sync", "recent", true},
+    {"source.outlook.recent_days", "14", true},
     {"table.time", "yes", true},
     {"table.room", "yes", true},
     {"table.teacher", "yes", true},
@@ -62,6 +65,9 @@ const struct {
     {"general", "limit caps whichever listing runs (0 = all); every key here is also a flag", ""},
     {"source.bakalari", "one section per source; enabled = no hides the source everywhere", ""},
     {"source.teams", "", ""},
+    {"source.outlook", "school mailbox, on the teams sign-in. sync: recent = unread mail from the\n"
+     "# last recent_days and nothing older, unread = every unread mail ever, all = the whole\n"
+     "# inbox; the last two ask before they run", ""},
     {"table", "what a timetable cell carries; each one off makes the grid narrower", ""},
     {"school", "H1 end date MM-DD (year rolls 1 Aug), average rounding floors, mark scale, percent floors 1..4", ""},
     {"key", "single-key mode switch in the tui; \"<char> = feed|marks|table\"",
@@ -122,14 +128,17 @@ std::string seed_file() {
 }
 
 void parse(std::istream &f, Config &c, bool quiet = false) {
-    std::string section, l;
+    std::string section, l, path = quiet ? std::string() : config_path();
+    int line = 0;
+    auto at = [&](const std::string &msg) { warn(path + ":" + std::to_string(line) + ": " + msg); };
     while (std::getline(f, l)) {
+        line++;
         std::string t = trim(l);
         if (t.empty() || t[0] == '#') continue;
         if (t[0] == '[') {
             size_t e = t.find(']');
             if (e == std::string::npos) {
-                if (!quiet) warn("unclosed section: " + t);
+                if (!quiet) at("unclosed section: " + t);
                 continue;
             }
             section = lower(trim(t.substr(1, e - 1)));
@@ -137,15 +146,15 @@ void parse(std::istream &f, Config &c, bool quiet = false) {
         }
         size_t eq = t.find('=');
         if (eq == std::string::npos) {
-            if (!quiet) warn("ignoring line without '=': " + t);
+            if (!quiet) at("ignoring line without '=': " + t);
             continue;
         }
         if (section.empty()) {
-            if (!quiet) warn("ignoring line before any [section]: " + t);
+            if (!quiet) at("ignoring line before any [section]: " + t);
             continue;
         }
         std::string k = section + "." + lower(trim(t.substr(0, eq))), v = trim(t.substr(eq + 1));
-        if (!quiet && !known(k)) warn("unknown key '" + k + "'");
+        if (!quiet && !known(k)) at("unknown key '" + k + "'");
         c.v[k] = v;
     }
 }
@@ -156,6 +165,8 @@ void load(Config &c) {
     if (!f) {
         std::ofstream o(config_path());
         o << seed_file();
+        o.close();
+        if (!o) warn("could not write " + config_path() + ": using built-in defaults");
         std::ifstream f2(config_path());
         f.swap(f2);
         if (!f) return;
@@ -225,20 +236,26 @@ bool config_save(const std::string &key, const std::string &val) {
     }
     std::string cur = "general";
     bool done = false;
+    size_t after = std::string::npos;  // one past the section's last key, for a missing key
     for (size_t i = 0; i < lines.size() && !done; i++) {
         std::string t = trim(lines[i]);
         if (!t.empty() && t[0] == '[') {
             size_t e = t.find(']');
             if (e != std::string::npos) cur = lower(trim(t.substr(1, e - 1)));
+            if (cur == section) after = i + 1;
             continue;
         }
         if (cur != section || t.empty() || t[0] == '#') continue;
+        after = i + 1;
         size_t eq = t.find('=');
         if (eq == std::string::npos || lower(trim(t.substr(0, eq))) != name) continue;
         lines[i] = name + " = " + val;
         done = true;
     }
-    if (!done) lines.push_back("[" + section + "]"), lines.push_back(name + " = " + val);
+    if (!done && after != std::string::npos)
+        lines.insert(lines.begin() + (long)after, name + " = " + val);
+    else if (!done)
+        lines.push_back("[" + section + "]"), lines.push_back(name + " = " + val);
     std::ofstream o(config_path());
     if (!o) return false;
     for (const std::string &l : lines) o << l << "\n";
@@ -361,9 +378,16 @@ int config_check() {
         setenv("XDG_CONFIG_HOME", dir.c_str(), 1);
         std::ofstream(config_path()) << "[source.bakalari]\nurl        = \n";
         bool ok = config_save("source.bakalari.url", "http://y");
+        ok = ok && config_save("source.bakalari.enabled", "no");  // key absent, section present
         Config back;
         std::ifstream f(config_path());
         parse(f, back, true);
+        std::ostringstream raw;
+        raw << std::ifstream(config_path()).rdbuf();
+        std::string text = raw.str();
+        if (text.find("[source.bakalari]", text.find("[source.bakalari]") + 1) != std::string::npos)
+            ok = false;  // no second header for a key added to an existing section
+        if (back.flag("source.bakalari.enabled")) ok = false;
         unlink(config_path().c_str());
         rmdir((dir + "/" APP_NAME).c_str());
         rmdir(dir.c_str());

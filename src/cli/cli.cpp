@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <cwchar>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,6 +21,10 @@
 
 #define CLI_NAME APP_NAME "c"
 #define NEXT_FMT_SIMPLE "%t %s %r"
+#define VERB_LIST "dismiss, open, marks, absence, timetable, next, new, auth, help"
+#ifndef VERSION  // set by the makefile
+#define VERSION "dev"
+#endif
 
 namespace {
 
@@ -50,7 +55,8 @@ int help() {
     row("next", "the upcoming lesson; nothing (exit 1) if none");
     row("new, n", "one-line summary of what you haven't seen");
     row("auth, a [source]", "sign-in state; a source name to sign in");
-    row("help, h", "this");
+    row("help, h", "this; --help works after any command");
+    row("--version", "print the version");
     printf("\n%s %s\n", c("1", "flags").c_str(),
            c("90", "one-shot overrides of " + config_path()).c_str());
     row("-n, --limit <n>", "cap the listing (0 = all)");
@@ -81,8 +87,7 @@ int next_help() {
 }
 
 void usage() {
-    fprintf(stderr, "usage: %s [filter...] | %s <dismiss|open|marks|absence|new|auth|help>\n", CLI_NAME,
-            CLI_NAME);
+    fprintf(stderr, "usage: %s [filter...] | %s <%s>\n", CLI_NAME, CLI_NAME, VERB_LIST);
     fprintf(stderr, "       %s\n", c("90", CLI_NAME " help  for the full list", 2).c_str());
 }
 
@@ -109,6 +114,8 @@ int show(const std::vector<std::string> &argf) {
             label.resize(9, ' ');
             fprintf(stderr, "  %s%s\n", c("1;33", label, 2).c_str(), c("39", list, 2).c_str());
         }
+        fprintf(stderr, "  %s%s\n", c("1;33", "commands:", 2).c_str(),
+                c("39", " " VERB_LIST, 2).c_str());
         fprintf(stderr, "%s\n", c("90", "  " CLI_NAME " help  for more", 2).c_str());
         return 2;
     }
@@ -120,11 +127,15 @@ int show(const std::vector<std::string> &argf) {
 
     if (f.rows.empty()) {
         puts(c("90", filters.empty() ? "nothing to show" : "nothing matches that filter").c_str());
+        if (filters.empty() && f.items.empty())
+            puts(c("90", "sign in with " CLI_NAME " auth, then fetch with " APP_NAME "d").c_str());
         return 0;
     }
 
-    for (const paint::Post &p : paint::feed_posts(f, (size_t)term_cols(), true))
-        for (const std::string &l : p.lines) puts(l.c_str());
+    size_t w = (size_t)term_cols();
+    bool tty = isatty(1);
+    for (const paint::Post &p : paint::feed_posts(f, w, true))
+        for (const std::string &l : p.lines) puts(tty ? paint::fit(l, w).c_str() : l.c_str());
     return 0;
 }
 
@@ -419,6 +430,13 @@ int selfcheck() {
         fputs("selfcheck failed: matches\n", stderr);
         return 1;
     }
+    // a wide glyph must cost two columns, or a grid row shears every row below it
+    if (paint::utf8_len("čeština") != 7 || paint::plain_cut("ab", 4) != "ab  " ||
+        paint::fit("abcdef", 4).compare(0, 6, "abc…") != 0 ||
+        (wcwidth(L'日') == 2 && (paint::utf8_len("日x") != 3 || paint::plain_cut("日x", 2) != "日"))) {
+        fputs("selfcheck failed: display width\n", stderr);
+        return 1;
+    }
     if (wrap("ab cd ef", 5) != std::vector<std::string>{"ab cd", "ef"} ||
         wrap("příliš žluťoučký", 8) != std::vector<std::string>{"příliš", "žluťoučký"}) {
         fputs("selfcheck failed: wrap\n", stderr);
@@ -540,6 +558,19 @@ void ensure_signed() {
     }
 }
 
+// the store is only as fresh as the last fetch; no verb may show its rows without saying so
+void warn_stale() {
+    Store s;
+    for (const view::Gripe &g : view::gripes(s))
+        fprintf(stderr, "%s %s\n", c(g.error ? "1;31" : "1;33", APP_NAME "d:", 2).c_str(),
+                c(g.error ? "1;31" : "1;33", g.text, 2).c_str());
+}
+
+void ready() {
+    ensure_signed();
+    warn_stale();
+}
+
 int new_summary() {
     Store s;
     view::NewCounts n = view::new_counts(s);
@@ -556,8 +587,6 @@ int new_summary() {
                          n.unsigned_pretty[i];
 
     std::vector<view::Gripe> bad = view::gripes(s);
-    if (!n.msgs && !n.work && !n.marks && bad.empty() && unsigned_line.empty())
-        puts(c("90", "nothing new").c_str());
     if (!unsigned_line.empty()) printf("%s\n", c("1;31", unsigned_line + " unsigned").c_str());
     for (const auto &b : bad)
         printf("%s %s\n", c(b.error ? "1;31" : "1;33", APP_NAME "d:").c_str(),
@@ -592,7 +621,16 @@ std::vector<char *> take_flags(int argc, char **argv, int &rc) {
     for (int a = 1; a < argc && rc == 0; a++) {
         std::string f = argv[a];
         if (f == "-n" || f == "--limit") {
-            if (const char *v = val(a, "--limit")) config().set("general.limit", v);
+            const char *v = val(a, "--limit");
+            if (!v) continue;
+            char *end = nullptr;
+            long n = strtol(v, &end, 10);
+            if (!*v || *end || n < 0) {
+                fprintf(stderr, "%s: --limit wants a count >= 0, not '%s'\n", CLI_NAME, v);
+                rc = 2;
+                continue;
+            }
+            config().set("general.limit", v);
         } else if (f == "--links") config().set("general.links", "yes");
         else if (f == "--no-links") config().set("general.links", "no");
         else if (f == "-b" || f == "--blacklist") {
@@ -613,6 +651,12 @@ std::vector<char *> take_flags(int argc, char **argv, int &rc) {
         else if (f == "-a" || f == "--all") {
             config().set("general.blacklist", "");
             config().set("general.limit", "0");
+        } else if (f.size() > 1 && f[0] == '-' && f != "--" &&
+                   f.find_first_not_of("0123456789", 1) != std::string::npos) {
+            // "-2" stays a word: `timetable -2` is a relative week, not a flag
+            fprintf(stderr, "%s: unknown flag '%s'\n", CLI_NAME, argv[a]);
+            fprintf(stderr, "%s\n", c("90", "  " CLI_NAME " help  for the flags", 2).c_str());
+            rc = 2;
         } else rest.push_back(argv[a]);
     }
     return rest;
@@ -670,18 +714,24 @@ int auth(int argc, char **argv) {
 int main(int argc, char **argv) {
     try {
         if (argc > 1 && !strcmp(argv[1], "--selfcheck")) return selfcheck();  // not a verb
+        bool wants_help = false, is_next = false;
+        for (int i = 1; i < argc; i++) {
+            if (!strcmp(argv[i], "--version")) return puts(CLI_NAME " " VERSION), 0;
+            wants_help |= !strcmp(argv[i], "--help") || !strcmp(argv[i], "-h");
+            is_next |= !strcmp(argv[i], "next");
+        }
+        if (wants_help) return is_next ? next_help() : help();
         std::vector<std::string> ex = expand_bind(argc, argv);
         std::vector<char *> bound{argv[0]};
         for (auto &w : ex) bound.push_back(&w[0]);
-        if (bound.size() > 1 &&
-            (!strcmp(bound[1], "--help") || verb(bound[1], "help", "h"))) return help();
+        if (bound.size() > 1 && verb(bound[1], "help", "h")) return help();
         int rc = 0;
         std::vector<char *> a = take_flags((int)bound.size(), bound.data(), rc);
         if (rc) return rc;
         int n = (int)a.size();
         char **v = a.data();
         if (!n) {
-            ensure_signed();
+            ready();
             return show({});
         }
         if (verb(v[0], "auth", "a")) return auth(n - 1, v + 1);
@@ -690,12 +740,12 @@ int main(int argc, char **argv) {
             usage();
             return 2;
         }
-        ensure_signed();
+        ready();
         if (verb(v[0], "marks", "m")) return marks({v + 1, v + n});
         if (verb(v[0], "absence", "b")) return absence({v + 1, v + n});
         if (verb(v[0], "timetable", "r")) return timetable(n - 1, v + 1);
         // no short alias for next: `n` is `new`
-        if (!strcmp(v[0], "next")) return n > 1 && !strcmp(v[1], "--help") ? next_help() : next_lesson();
+        if (!strcmp(v[0], "next")) return next_lesson();
         if (verb(v[0], "dismiss", "d")) return dismiss(n - 1, v + 1);
         if (verb(v[0], "open", "o")) return open_item(n - 1, v + 1);
         return show({v, v + n});

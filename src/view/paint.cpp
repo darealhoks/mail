@@ -5,6 +5,9 @@
 #include <cstring>
 #include <ctime>
 
+#include <clocale>
+#include <cwchar>
+
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -16,27 +19,54 @@
 
 namespace paint {
 
+// wcwidth() needs a utf-8 LC_CTYPE; no main here owns one, so claim it for all three binaries
+static const bool locale_claimed = (setlocale(LC_CTYPE, ""), true);
+
 int term_cols(bool cap) {
+    if (!isatty(1)) return 1000;  // piped: no rules, no hard wrap to fight grep
     struct winsize w {};
-    if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_col > 20) return !cap || w.ws_col < 100 ? w.ws_col : 100;
+    if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) return !cap || w.ws_col < 100 ? w.ws_col : 100;
     return 80;
+}
+
+// one utf-8 sequence at i -> codepoint; returns the bytes it spans, 1 on a malformed lead
+static size_t decode(const std::string &s, size_t i, wchar_t &cp) {
+    unsigned char b = (unsigned char)s[i];
+    size_t n = b < 0x80 ? 1 : (b >> 5) == 6 ? 2 : (b >> 4) == 14 ? 3 : (b >> 3) == 30 ? 4 : 1;
+    if (i + n > s.size()) n = 1;
+    cp = n == 1 ? (wchar_t)b : (wchar_t)(b & (0xFF >> (n + 1)));
+    for (size_t k = 1; k < n; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+    return n;
+}
+
+// -1 (unprintable, or a non-utf8 locale) counts as one column: never under-count and shear
+static size_t cp_width(wchar_t cp) {
+    (void)locale_claimed;
+    int w = wcwidth(cp);
+    return w < 0 ? 1 : (size_t)w;
 }
 
 size_t utf8_len(const std::string &s) {
     size_t n = 0;
-    for (unsigned char ch : s)
-        if ((ch & 0xC0) != 0x80) n++;
+    for (size_t i = 0; i < s.size();) {
+        wchar_t cp;
+        i += decode(s, i, cp);
+        n += cp_width(cp);
+    }
     return n;
 }
 
-// cut to w codepoints and pad to exactly w; the input carries no sgr
+// cut to w display columns and pad to exactly w; the input carries no sgr
 std::string plain_cut(const std::string &s, size_t w) {
     std::string out;
     size_t vis = 0;
-    for (size_t i = 0; i < s.size() && vis < w; i++) {
-        out += s[i];
-        while (i + 1 < s.size() && (unsigned char)s[i + 1] >> 6 == 2) out += s[++i];
-        vis++;
+    for (size_t i = 0; i < s.size();) {
+        wchar_t cp;
+        size_t n = decode(s, i, cp), cw = cp_width(cp);
+        if (vis + cw > w) break;
+        out.append(s, i, n);
+        vis += cw;
+        i += n;
     }
     out.append(w - vis, ' ');
     return out;
@@ -279,7 +309,7 @@ TableLayout table_layout(const view::Timetable &tt, size_t need, size_t cols, si
 }
 
 std::string fit(const std::string &l, size_t width) {
-    size_t vis = 0, i = 0, cut = 0;
+    size_t vis = 0, i = 0, cut = std::string::npos;
     bool over = false;
     while (i < l.size()) {
         if (l[i] == 27) {  // csi: esc [ ... final byte 0x40-0x7e
@@ -290,15 +320,16 @@ std::string fit(const std::string &l, size_t width) {
             i = j + 1;
             continue;
         }
-        if ((unsigned char)l[i] >> 6 != 2) {
-            if (vis == width) { over = true; break; }
-            if (vis + 1 == width) cut = i;
-            vis++;
-        }
-        i++;
+        wchar_t cp;
+        size_t n = decode(l, i, cp), cw = cp_width(cp);
+        if (vis + cw > width) { over = true; break; }
+        if (cut == std::string::npos && vis + cw > width - std::min<size_t>(width, 1)) cut = i;
+        vis += cw;
+        i += n;
     }
     if (!over) return l;
-    return l.substr(0, cut) + "…\033[0m";
+    return l.substr(0, cut == std::string::npos ? 0 : cut) + "…" +
+           (color_on() ? "\033[0m" : "");
 }
 
 std::string hhmm(const std::string &t) {
@@ -306,26 +337,48 @@ std::string hhmm(const std::string &t) {
 }
 
 int open_url(const std::string &url) {
-    if (url.empty() || url.find('\'') != std::string::npos) return 1;
+    auto bad = [&](const std::string &why) {
+        fprintf(stderr, "%s\n", c("1;31", "cannot open " + (url.empty() ? "an empty url" : url) +
+                                              ": " + why, 2).c_str());
+        return 1;
+    };
+    if (url.empty()) return bad("nothing to open");
+    if (url.find('\'') != std::string::npos) return bad("the url contains a quote");
     std::string opener = config().str("general.browser");
     if (opener.empty()) opener = "xdg-open";
-    return system((opener + " '" + url + "' >/dev/null 2>&1 &").c_str()) == 0 ? 0 : 1;
+    // the trailing & makes system() succeed whatever the opener does, so look for it first
+    std::string prog = opener.substr(0, opener.find(' '));
+    if (system(("command -v '" + prog + "' >/dev/null 2>&1").c_str()) != 0)
+        return bad(prog + " not found; set general.browser");
+    if (system((opener + " '" + url + "' >/dev/null 2>&1 &").c_str()) != 0)
+        return bad(opener + " failed");
+    return 0;
 }
 
 std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
     std::string ac = std::string("1;") + accent();
     std::vector<Post> out;
     int bucket = -1;
+    bool tty = isatty(1);
+    auto rule = [&](const std::string &lab, const char *col) {
+        std::string s = "── " + lab;
+        if (tty) {
+            s += " ";
+            for (size_t n = utf8_len(lab) + 4; n < width; n++) s += "─";
+        }
+        return c(col, s);
+    };
     for (const view::FeedRow &r : f.rows) {
         const Item &i = f.items[r.n - 1];
         Post p;
         if (r.bucket != bucket) {
             bucket = r.bucket;
-            p.lines.push_back(c("1;90", bucket == 0   ? "— no deadline —"
-                                        : bucket == 1 ? "— upcoming —"
-                                                      : "— overdue —"));
+            p.lines.push_back(rule(bucket == 0 ? "no deadline" : bucket == 1 ? "upcoming" : "overdue",
+                                   "1;90"));
         }
-        size_t chips = utf8_len(r.klass) + i.kind.size() + i.source.size() + 10;
+        // event_at is when it was posted upstream; fetched_at is the best guess when it is missing
+        std::string posted = date_short(view::ymd_local(i.event_at ? i.event_at : i.fetched_at));
+        size_t chips = utf8_len(r.klass) + i.kind.size() + i.source.size() + utf8_len(posted) + 11;
         std::vector<std::string> title =
             wrap(teams::style_strip(i.title), width > chips + 30 ? width - chips : 30);
         p.lines.push_back((numbered ? c("90", std::to_string(r.n)) + " " : "") +
@@ -333,7 +386,7 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
                           c("1", title.empty() ? "" : title[0] + (title.size() > 1 ? "…" : "")) +
                           "  " + c(ac.c_str(), "<" + r.klass + ">") + " " +
                           c(kind_color(i.kind), "<" + i.kind + ">") + " " +
-                          c("90", "<" + i.source + ">"));
+                          c("90", "<" + i.source + ">") + " " + c("90", posted));
         // teams posts have no subject line, so their title is the first slice of the body
         std::string rest = i.body.compare(0, i.title.size(), i.title) == 0
                                ? i.body.substr(i.title.size())
@@ -422,7 +475,10 @@ std::vector<std::string> mark_lines(const view::Marks &m, size_t width) {
         }
         std::string d = r.event_at ? date_short(view::ymd_local(r.event_at)) : "";
         d.append(dw - std::min(dw, utf8_len(d)), ' ');
-        std::string note = plain_cut(teams::style_strip(r.note), width > used + 8 ? width - used : 8);
+        size_t nw = width > used + 8 ? width - used : 8;
+        std::string full = teams::style_strip(r.note);
+        bool cut = utf8_len(full) > nw;
+        std::string note = plain_cut(full, cut ? nw - 1 : nw) + (cut ? "…" : "");
         while (!note.empty() && note.back() == ' ') note.pop_back();
         out.push_back((r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") + c("90", d) + "  " +
                       (wc ? c(ac.c_str(), r.klass + std::string(wc - utf8_len(r.klass), ' ')) + "  "

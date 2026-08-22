@@ -4,8 +4,8 @@
 first read. Sectioned ini: `[section]` headers, `key = value`, `#` comments. Keys are
 `section.key` in code (`config().str/num/flag/list`); defaults live in one table in
 `src/core/config.cpp` and the seeded file is generated from it. Unknown keys warn on stderr.
-Keys before the first header are read as `[general]` with a warning — that is how a
-pre-sections file keeps working; nothing is dropped.
+Keys before the first header are dropped with a warning, not filed under `[general]`.
+Warnings carry `<config path>:<line>`.
 
     [general]
     limit      0     cap whichever listing runs, 0 = all (the feed keeps the tail: most urgent)
@@ -25,6 +25,12 @@ pre-sections file keeps working; nothing is dropped.
 
     [source.teams]
     enabled    yes
+
+    [source.outlook]
+    enabled    no      off by default; the mailbox is opt-in
+    sync     recent    recent = unread mail newer than recent_days, unread = every unread
+                       mail, all = the whole inbox. the last two ask for a y first
+    recent_days  14
 
     [table]
     time       yes   the time row(s) over the timetable grid

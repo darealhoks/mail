@@ -31,13 +31,18 @@ under another name (binaries, config dir, data dir).
     */15 * * * * maild           # crontab: keep fetching
     mailc                        # the feed, nearest deadline first
     mailc <word>                 # filter it
-    mailc marks                  # marks by quarter
-    mailc timetable              # this week's grid
-    mailc next                   # the next lesson (-f "%t %s %r" for bars)
-    mailc new                    # counts, for a shell prompt hook
-    mailc auth [source]          # sign-in state, or sign in
+    mailc marks, m               # marks by half (25/26 · H1), absence per subject under it
+    mailc absence, b             # absence per subject
+    mailc timetable, r [week]    # this week's grid; +n/-n or YYYY-MM-DD picks another
+    mailc next                   # the next lesson (-s for bars; next --help lists the % verbs)
+    mailc new, n                 # counts, for a shell prompt hook
+    mailc auth, a [source]       # sign-in state, or sign in
 
-    mailc dismiss <n> / open <n> # by feed index
+    mailc dismiss <n>, d / open <n>, o    # by feed index
+
+Flags, one-shot overrides of the config: `-n/--limit <n>`, `--links/--no-links`,
+`-b/--blacklist a,b`, `-B/--no-blacklist`, `-a/--all`, and `next`-only `-s/--simple`,
+`-f/--format <fmt>`. `mailc help` prints the lot.
 
     mailt                        # WIP: the same store in a full-screen TUI
 
@@ -45,8 +50,15 @@ under another name (binaries, config dir, data dir).
 selected post, `a` sign in, `r` fetch now, `q` quits; mouse and wheel work. It redraws
 when `maild` writes. Rebind the tabs in the config (`key.<char> = feed|marks|timetable`).
 
-Set your school's Bakaláři url in `~/.config/mail/config` (written with commented
-defaults on first run), then `mailc auth`.
+First run:
+
+    ./install.sh
+    mailc auth bakalari          # asks for the url, then username and password
+    mailc auth teams             # device-code sign-in in a browser
+    maild                        # first fetch
+
+`~/.config/mail/config` is written with commented defaults on first run; every key is
+documented in `.map/config.md`.
 
 ## Layout
 

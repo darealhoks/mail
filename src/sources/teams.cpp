@@ -26,11 +26,6 @@ const char *TASK_BOT = "7254e396-868c-4bf7-96b2-6fe763590b5a";
 
 long long now() { return (long long)time(nullptr); }
 
-struct GraphError : std::runtime_error {
-    GraphError(long s, const std::string &m) : std::runtime_error(m), status(s) {}
-    long status;
-};
-
 // oauth::access_token hands back the cached token until it is near expiry; dropping it
 // from the creds file ("teams" == CREDS in teams_auth.cpp) is what forces a real refresh
 std::string remint() {
@@ -41,8 +36,12 @@ std::string remint() {
     return access_token();
 }
 
-std::string graph(std::string &token, const std::string &url) {
+}  // namespace
+
+std::string graph_get(std::string &token, const std::string &url,
+                      const std::vector<std::string> &extra_headers) {
     std::vector<std::string> h{"Authorization: Bearer " + token};
+    h.insert(h.end(), extra_headers.begin(), extra_headers.end());
     bool reminted = false;
     for (int attempt = 0;; attempt++) {
         HttpResponse r = http_get(url, h);
@@ -61,9 +60,11 @@ std::string graph(std::string &token, const std::string &url) {
             attempt = -1;
             continue;
         }
-        throw GraphError(r.status, "teams: http " + std::to_string(r.status) + " on " + url);
+        throw GraphError(r.status, "graph: http " + std::to_string(r.status) + " on " + url);
     }
 }
+
+namespace {
 
 std::string iso_utc(long long t) {
     struct tm tm {};
@@ -240,14 +241,14 @@ std::vector<Channel> channels(std::string &token, Store &st) {
     }
     std::vector<Channel> out;
     std::string blob;
-    Json teams(graph(token, std::string(G) + "/me/joinedTeams"));
+    Json teams(graph_get(token, std::string(G) + "/me/joinedTeams"));
     auto tv = teams.root.at_key("value").get_array();
     if (tv.error()) throw std::runtime_error("teams: joinedTeams missing value array");
     for (auto t : tv.value()) {
         std::string tid = sv(t, "id");
         if (tid.empty()) continue;
         std::string tname = sv(t, "displayName");
-        Json chs(graph(token, std::string(G) + "/teams/" + tid + "/channels"));
+        Json chs(graph_get(token, std::string(G) + "/teams/" + tid + "/channels"));
         auto cv = chs.root.at_key("value").get_array();
         if (cv.error()) continue;
         for (auto c : cv.value()) {
@@ -336,7 +337,7 @@ bool to_item(simdjson::dom::element m, const Channel &ch, Item &out) {
     simdjson::dom::element app;
     if (!m.at_key("from").at_key("application").get(app) && sv(app, "id") == TASK_BOT)
         out.body += std::string("\n") + TASK_NOTE;
-    out.due_at = classify::epoch(r.deadline);
+    out.due_at = classify::due_epoch(r.deadline);
     out.event_at = classify::epoch(created);
     out.src_uid = "msg:" + id;
     out.url = sv(m, "webUrl");
@@ -364,14 +365,14 @@ std::vector<Item> fetch(Store &st) {
         for (int page = 0; page < MAX_PAGES && !url.empty(); page++) {
             std::string body;
             try {
-                body = graph(token, url);
+                body = graph_get(token, url);
             } catch (const GraphError &e) {
                 // an expired or rejected delta token only resets that channel
                 if (!resumed || page || (e.status != 400 && e.status != 410)) throw;
                 st.set_state(key, "");
                 url = cold;
                 resumed = false;
-                body = graph(token, url);
+                body = graph_get(token, url);
             }
             Json j(body);
             auto v = j.root.at_key("value").get_array();

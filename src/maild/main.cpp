@@ -19,6 +19,7 @@
 #include "store.h"
 #include "view.h"
 #include "paint.h"
+#include "outlook.h"
 #include "teams.h"
 
 namespace {
@@ -69,9 +70,26 @@ int classify_check() {
     return 0;
 }
 
+int outlook_check() {
+    config().set("source.outlook.sync", "");
+    CHECK(outlook::mode() == "recent");            // unset and junk both fall back
+    config().set("source.outlook.sync", "every");
+    CHECK(outlook::mode() == "recent");
+    CHECK(outlook::cold_size(4000, 12) == 12);     // recent/unread cost the unread count
+    config().set("source.outlook.sync", "unread");
+    CHECK(outlook::mode() == "unread" && outlook::cold_size(4000, 12) == 12);
+    config().set("source.outlook.sync", "all");
+    CHECK(outlook::mode() == "all" && outlook::cold_size(4000, 12) == 4000);
+    config().set("source.outlook.sync", "recent");
+    CHECK(outlook::strip_invisible("a\u200c\u200b b\ufeff") == "a b");  // preheader padding
+    CHECK(outlook::strip_invisible("\u2013 dash stays") == "\u2013 dash stays");
+    return 0;
+}
+
 int selfcheck() {
     CHECK(classify_check() == 0);
     CHECK(config_check() == 0);
+    CHECK(outlook_check() == 0);
     Json j(R"({"a":"x\ny","n":42})");
     CHECK(j.str("a") == "x\ny");
     CHECK(j.num("n") == 42);
@@ -148,6 +166,28 @@ int selfcheck() {
     }
     remove(tmp.c_str());
 
+    {
+        Store s(tmp);
+        long long now = (long long)time(nullptr);
+        auto add = [&](const char *uid, const char *kind, long long due, long long ev) {
+            Item i = item("teams");
+            i.src_uid = uid;
+            i.title = uid;
+            i.kind = kind;
+            i.due_at = due;
+            i.event_at = ev;
+            CHECK(s.insert_item(i));
+            return 0;
+        };
+        CHECK(add("old", "task", now - 90 * 86400, 0) == 0);   // past the 30d window
+        CHECK(add("task", "task", 0, now - 3 * 86400) == 0);
+        CHECK(add("post", "post", 0, now) == 0);
+        auto f = s.feed();
+        CHECK(f.size() == 2);                                  // overdue term-old task dropped
+        CHECK(f[0].title == "post" && f[1].title == "task");   // undated actionables sink
+    }
+    remove(tmp.c_str());
+
     CHECK(teams::plain_text("<p>a<br/>b</p><div>c &amp;amp; d</div>") == "a\nb\nc & d");
     CHECK(teams::plain_text("see https://x.y/z now") == "see https://x.y/z now");
     CHECK(teams::plain_text("<a href=\"https://x.y/z\">https://x.y/z</a>.") == "https://x.y/z .");
@@ -199,19 +239,26 @@ int fetch_all(bool cold_flag) {
     Store store;
     int rc = 0;
     std::map<std::string, int> fresh_kinds;
-    // teams resumes from a per-channel delta link; drop them and it rescrapes the whole window
-    if (cold_flag) {
-        store.clear_state("teams.delta.%");
-        store.clear_state("teams.channels%");
-        store.clear_state("bakalari.swept_at");
-    }
+    // every cursor key is namespaced by its source; a cold run drops the lot and rescrapes
     bool tty = isatty(2);
-    teams::progress = [tty](size_t done, size_t total, const std::string &what) {
-        if (!tty) return;
-        fprintf(stderr, "\rteams: %zu/%zu  %-30.30s", done, total, what.c_str());
-        if (done == total) fputs("\r\033[K", stderr);
+    for (const Source &src : sources()) {
+        if (cold_flag) store.clear_state(std::string(src.name) + ".%");
+        if (!src.progress) continue;
+        *src.progress = [tty, name = std::string(src.name)](size_t done, size_t total,
+                                                            const std::string &what) {
+            if (!tty) return;
+            fprintf(stderr, "\r%s: %zu/%zu  %-30.30s", name.c_str(), done, total, what.c_str());
+            if (done == total) fputs("\r\033[K", stderr);
+        };
+    }
+    // inside a catch: a throwing log would escape run() and cost every source after this one
+    auto log_fail = [&](const char *name, long long started, const char *err) {
+        try {
+            store.log_fetch(name, started, false, err, 0);
+        } catch (const std::exception &e) {
+            fprintf(stderr, "%s: cannot log failure: %s\n", name, e.what());
+        }
     };
-    store.set_state("daemon.interval", config().str("general.interval"));
     auto run = [&](const char *name, auto &&fn) {
         long long started = (long long)time(nullptr);
         bool cold = cold_flag || store.last_ok_fetch(name) == 0;
@@ -236,11 +283,11 @@ int fetch_all(bool cold_flag) {
                         fresh++;
                         if (!cold) fresh_kinds[i.kind]++;
                     }
+                store.commit();
             } catch (...) {
                 store.rollback();
                 throw;
             }
-            store.commit();
             store.log_fetch(name, started, true, "", cold ? 0 : fresh);
             store.set_state(std::string("expired.") + name, "");
             if (cold) {
@@ -249,7 +296,7 @@ int fetch_all(bool cold_flag) {
                 printf("%s: cold run, backfilled %s\n", name, ys.c_str());
             } else printf("%s: %d new\n", name, fresh);
         } catch (const SessionExpired &e) {
-            store.log_fetch(name, started, false, e.what(), 0);
+            log_fail(name, started, e.what());
             fprintf(stderr, "%s: %s\n", name, e.what());
             rc = 1;
             // one notification per outage; cleared by the next fetch that works
@@ -260,7 +307,7 @@ int fetch_all(bool cold_flag) {
                        APP_NAME "c auth " + std::string(name), ICON_LOCK);
             }
         } catch (const std::exception &e) {
-            store.log_fetch(name, started, false, e.what(), 0);
+            log_fail(name, started, e.what());
             fprintf(stderr, "%s: %s\n", name, e.what());
             if (std::string(e.what()).rfind(OFFLINE_TAG, 0) != 0) rc = 1;  // no net is not a failure worth mailing from cron
         }
