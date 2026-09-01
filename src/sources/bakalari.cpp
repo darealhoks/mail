@@ -11,6 +11,7 @@
 
 #include "classify.h"
 #include "config.h"
+#include "creds.h"
 #include "http.h"
 #include "json.h"
 #include "oauth.h"
@@ -47,14 +48,36 @@ std::string access_token() {
     });
 }
 
+// bakalari can invalidate an access token before its nominal expiry; dropping it from the
+// creds file forces oauth::access_token to do a real refresh (mirrors teams::remint)
+std::string remint() {
+    auto kv = creds_load(CREDS);
+    kv.erase("access_token");
+    kv.erase("access_expires_at");
+    creds_save(CREDS, kv);
+    return access_token();
+}
+
 std::string api(const std::string &path, bool post = false, const std::string &body = "") {
-    std::vector<std::string> h{"Authorization: Bearer " + access_token()};
-    HttpResponse r = post ? http_post_form(base() + path, body, h)
-                          : http_get(base() + path, h);
-    if (r.status == 401) throw SessionExpired("bakalari: token rejected on " + path);
-    if (r.status != 200)
-        throw std::runtime_error("bakalari: " + path + " -> http " + std::to_string(r.status));
-    return r.body;
+    std::string token = access_token();
+    bool reminted = false;
+    for (;;) {
+        std::vector<std::string> h{"Authorization: Bearer " + token};
+        HttpResponse r = post ? http_post_form(base() + path, body, h)
+                              : http_get(base() + path, h);
+        if (r.status == 401) {
+            // a valid token can outlive its server-side session; only a 401 on a freshly
+            // refreshed token is a dead session
+            if (reminted) throw SessionExpired("bakalari: token rejected on " + path);
+            reminted = true;
+            token = remint();
+            continue;
+        }
+        if (r.status != 200)
+            throw std::runtime_error("bakalari: " + path + " -> http " +
+                                     std::to_string(r.status));
+        return r.body;
+    }
 }
 
 using El = simdjson::dom::element;
