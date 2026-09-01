@@ -2,6 +2,7 @@
 #include "teams.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <stdexcept>
@@ -367,6 +368,15 @@ std::vector<Item> fetch(Store &st) {
             try {
                 body = graph_get(token, url);
             } catch (const GraphError &e) {
+                // access to the channel is gone (left the team, archived, went private):
+                // drop it and expire the channel cache so the next run re-lists without it
+                if (e.status == 403 || e.status == 404) {
+                    st.set_state(key, "");
+                    st.set_state("teams.channels_at", "0");
+                    fprintf(stderr, "teams: dropping %s / %s: http %ld\n", ch.team.c_str(),
+                            ch.name.c_str(), e.status);
+                    break;
+                }
                 // an expired or rejected delta token only resets that channel
                 if (!resumed || page || (e.status != 400 && e.status != 410)) throw;
                 st.set_state(key, "");
