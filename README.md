@@ -71,10 +71,11 @@ One-shot overrides of the config: `-n/--limit <n>`, `--links/--no-links`,
     mailt
 
 Four tabs — `f` feed, `m` marks, `t` timetable, `b` absence; `tab`/`shift-tab` cycle.
-Everything scrolls with `j k ↓ ↑ space ^d ^u pgup pgdn g G`. The feed moves a post at a time,
-centred, and by paragraph through one taller than the screen; `J`/`K` always jump whole posts, `enter` opens the link, `X` dismisses. In the timetable `hjkl` move,
-`enter` shows the lesson in full, `[` `]` change week, `p` toggles the permanent grid and `w` (or a click on the
-week label) picks one from a list.
+Everything scrolls with `j k ↓ ↑ space ^d ^u pgup pgdn g G`. The feed moves a post at a
+time, centred, and by paragraph through one taller than the screen; `J`/`K` always jump
+whole posts, `enter` opens the link, `X` dismisses. In the timetable `hjkl` move, `enter`
+shows the lesson in full, `[` `]` (or the `<` `>` in the header) change week, `p` toggles
+the permanent grid and `w` (or a click on the week label) picks one from a list.
 `/` filters, `esc` clears; `a` signs in, `r` fetches now, `q` quits. Mouse and wheel work,
 and it redraws when `maild` writes.
 
