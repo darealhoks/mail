@@ -14,12 +14,8 @@ std::string fold(const std::string &s);
 // teams course names carry group and year noise ("3A_GRS_SK1_25/26"); bakalari already ships
 // the bare abbrev, so pick the first 2-4 letter uppercase token to make the two agree
 std::string abbrev(const std::string &raw);
-// a filter word matches an item's kind, class abbrev or source; several words are ANDed
-bool matches(const Item &i, const std::vector<std::string> &filters);
-
-// "new" = id above the watermark the last listing left behind; ids grow with insertion order
-long long watermark(Store &s, const char *key);
-void set_watermark(Store &s, const char *key, const std::vector<Item> &items);
+// argv words -> the folded filter list every rows() call takes
+std::vector<std::string> fold_all(const std::vector<std::string> &words);
 
 std::string ymd_local(long long t);
 // monday of the week containing t
@@ -34,7 +30,6 @@ long long local_at(const std::string &date, const std::string &hm);
 // 90s / 25m / 4h / 3d: one ladder behind every "how long ago" and "in how long" in the ui
 std::string rel_span(long long secs);
 std::string ago(long long t);
-std::string dur(long long s);
 
 // mark 1..5 for a "<got>/<max>" text via school.points, 0 when it is not a fraction
 int points_of(const std::string &t);
@@ -63,9 +58,17 @@ struct MarkRow {
     std::string period, klass, mark, note;
 };
 
+struct Absences {
+    std::vector<Absence> rows;
+    std::string year;  // "25/26"; the totals upstream sent are for exactly one school year
+    std::string note;  // non-empty: why the numbers are not this year's after all
+};
+// filters must already be folded; with none, the blacklist applies
+Absences absence_rows(Store &s, const std::vector<std::string> &filters);
+
 struct Marks {
     std::vector<MarkRow> rows;
-    std::vector<Absence> absences;  // only the subjects the rows show, alphabetical
+    Absences absences;  // only the subjects the rows show, alphabetical
     // {class abbrev, half-year label, weighted mean}, class-major, oldest period first
     std::vector<std::tuple<std::string, std::string, double>> averages;
 };
@@ -74,12 +77,11 @@ struct Marks {
 Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit,
                  bool consume_new = true);
 
-// filters must already be folded; with none, the blacklist applies
-std::vector<Absence> absence_rows(Store &s, const std::vector<std::string> &filters);
-
 struct Timetable {
     std::string monday;
     bool permanent = false;  // no lessons stored for this week: the recurring grid, re-dated
+    // whole-day events covering part of this week, date-major ("Hlavní prázdniny")
+    std::vector<std::pair<std::string, std::string>> notes;
     std::vector<Lesson> rows;
     std::vector<std::string> days;   // dates, display order
     std::vector<std::string> hours;  // hour numbers, ascending
@@ -103,8 +105,6 @@ struct Timetable {
 // monday empty = wanted_monday(); any other week reads whatever is stored for it, and falls
 // back to the permanent grid when nothing is
 Timetable timetable(Store &s, const std::string &monday = "");
-// drop hour columns and day rows nothing occupies: a 0th hour or a long tail costs width
-void compact(Timetable &t);
 
 struct Next {
     enum State { None, NoTimes, Ok } state = None;
@@ -117,22 +117,31 @@ struct SourceStatus {
     std::string name, pretty, error;
     bool signed_in = false;
     long long refreshed_at = 0, fetched_at = 0;
-    bool stale = false, offline = false;
+    bool stale = false;
 };
-std::vector<SourceStatus> status(Store &s);
-
-// short health check shared by `new`. errors are red, staleness is a yellow warning:
-// a cron user with a long period is not broken, just slow, and can silence it (stale_warn)
+// errors are red, staleness is a yellow warning: a cron user with a long period is not
+// broken, just slow, and can silence it (stale_warn)
 struct Gripe {
-    std::string text;
+    std::string text;   // the whole story, for a status line with room for it
+    std::string brief;  // "bakalari: stale" — for `new`, which lands in a shell prompt
     bool error;
 };
-std::vector<Gripe> gripes(Store &s);
+
+// one sweep of every source. status() and gripes() both cost a session probe per source, and
+// the tui asks for them on every repaint, so they are answered together or not at all
+struct Health {
+    std::vector<SourceStatus> sources;
+    std::vector<Gripe> gripes;
+    bool offline = false;
+    // sources not signed in, by argv name — what `mailc auth <name>` wants
+    std::vector<std::string> unsigned_names;
+};
+Health health(Store &s);
+// every source that ran last failed for lack of connectivity; no session probe, so cheap
 bool offline(Store &s);
 
 struct NewCounts {
     int msgs = 0, work = 0, marks = 0;
-    std::vector<std::string> unsigned_pretty;
 };
 NewCounts new_counts(Store &s);
 

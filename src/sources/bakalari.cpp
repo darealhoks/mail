@@ -16,7 +16,7 @@
 #include "json.h"
 #include "oauth.h"
 #include "term.h"
-#include "teams.h"
+#include "text.h"
 
 namespace bakalari {
 namespace {
@@ -42,23 +42,33 @@ long long now() { return (long long)time(nullptr); }
 
 using oauth::form;
 
+bool expired(long status, const Json &) { return status == 400 || status == 401; }
+
+// the refresh token can die (password change, server-side revoke) while the password still
+// works: replay the stored sign-in once instead of making the user re-auth by hand
 std::string access_token() {
-    return oauth::access_token(cfg(), [](long status, const Json &) {
-        return status == 400 || status == 401;
-    });
+    try {
+        return oauth::access_token(cfg(), expired);
+    } catch (const SessionExpired &) {
+        auto kv = creds_load(CREDS);
+        if (kv["username"].empty() || kv["password"].empty()) throw;
+        try {
+            login(kv["username"], kv["password"]);
+        } catch (const SessionExpired &e) {
+            // only an outright rejection drops the password; it would otherwise be replayed on
+            // every fetch. a server that is merely unreachable or broken must never cost the
+            // user a working credential, so every other failure passes through untouched
+            kv.erase("password");
+            creds_save(CREDS, kv);
+            throw SessionExpired("bakalari: stored password rejected: " + std::string(e.what()));
+        }
+        return oauth::access_token(cfg(), expired);
+    }
 }
 
-// bakalari can invalidate an access token before its nominal expiry; dropping it from the
-// creds file forces oauth::access_token to do a real refresh (mirrors teams::remint)
-std::string remint() {
-    auto kv = creds_load(CREDS);
-    kv.erase("access_token");
-    kv.erase("access_expires_at");
-    creds_save(CREDS, kv);
-    return access_token();
-}
-
-std::string api(const std::string &path, bool post = false, const std::string &body = "") {
+// soft, when set, takes the http status of a non-200 instead of throwing (401 still retries)
+std::string api(const std::string &path, bool post = false, const std::string &body = "",
+                long *soft = nullptr) {
     std::string token = access_token();
     bool reminted = false;
     for (;;) {
@@ -70,57 +80,39 @@ std::string api(const std::string &path, bool post = false, const std::string &b
             // refreshed token is a dead session
             if (reminted) throw SessionExpired("bakalari: token rejected on " + path);
             reminted = true;
-            token = remint();
+            oauth::forget_access(cfg());
+            token = access_token();
             continue;
         }
-        if (r.status != 200)
+        if (r.status != 200) {
+            if (soft) {
+                *soft = r.status;
+                return r.body;
+            }
             throw std::runtime_error("bakalari: " + path + " -> http " +
                                      std::to_string(r.status));
+        }
         return r.body;
     }
 }
 
 using El = simdjson::dom::element;
 
-// ids come back as strings on some endpoints and as numbers on others
-std::string s(El e, const char *k) {
-    auto v = e.at_key(k).get_string();
-    if (!v.error()) return std::string(v.value());
-    auto n = e.at_key(k).get_int64();
-    return n.error() ? std::string() : std::to_string(n.value());
-}
-
+std::string s(El e, const char *k) { return jstr(e, k); }
 // sub-object lookups chain, so accept the result type too; a missing object reads as empty
 std::string s(simdjson::simdjson_result<El> e, const char *k) {
     El v;
-    return e.get(v) ? std::string() : s(v, k);
+    return e.get(v) ? std::string() : jstr(v, k);
 }
 
-// counts come back as numbers, but a missing or non-numeric one must read as zero
-double num(El e, const char *k) {
-    double d = 0;
-    if (e.at_key(k).get(d)) {
-        int64_t i = 0;
-        return e.at_key(k).get(i) ? 0 : (double)i;
-    }
-    return d;
-}
-
+// a payload that lost an array we read is a shape change, not an empty result: say so
 simdjson::dom::array arr(El e, const char *k, const char *what) {
     auto a = e.at_key(k).get_array();
     if (a.error()) throw std::runtime_error(std::string("bakalari: ") + what + " missing array " + k);
     return a.value();
 }
 
-
-std::string ymd(long long t) {
-    struct tm tm {};
-    time_t tt = (time_t)t;
-    gmtime_r(&tt, &tm);
-    char b[16];
-    strftime(b, sizeof b, "%Y-%m-%d", &tm);
-    return b;
-}
+std::string ymd(long long t) { return text::utc(t, "%Y-%m-%d"); }
 
 const long long DAY = 86400;
 
@@ -181,10 +173,19 @@ void login(const std::string &user, const std::string &pass) {
                        form("username", user) + "&" + form("password", pass);
     HttpResponse r = http_post_form(base() + "/api/login", body);
     Json j(r.body);
-    if (r.status != 200)
-        throw std::runtime_error("bakalari: login failed (http " + std::to_string(r.status) + " " +
-                                 j.str("error_description", j.str("error", "unknown")) + ")");
+    if (r.status != 200) {
+        std::string why = "bakalari: login failed (http " + std::to_string(r.status) + " " +
+                          j.str("error_description", j.str("error", "unknown")) + ")";
+        // 400/401 is the server rejecting these credentials; anything else is its own problem
+        if (r.status == 400 || r.status == 401) throw SessionExpired(why);
+        throw std::runtime_error(why);
+    }
     oauth::save_tokens(cfg(), j);
+    // kept for the auto re-sign-in in access_token(); same 0600 file as the refresh token
+    auto kv = creds_load(CREDS);
+    kv["username"] = user;
+    kv["password"] = pass;
+    creds_save(CREDS, kv);
 }
 
 bool have_session() { return oauth::have_session(cfg()); }
@@ -244,7 +245,7 @@ std::vector<Item> fetch(Store &store) {
             i.source = "bakalari";
             i.kind = "task";
             i.klass = trim(s(e.at_key("Subject"), "Abbrev"));
-            i.body = teams::plain_text(s(e, "Content"));
+            i.body = text::plain_text(s(e, "Content"));
             i.title = i.body.substr(0, i.body.find('\n'));
             i.due_at = classify::due_epoch(s(e, "DateEnd"));
             i.url = web("vyuka.aspx");
@@ -290,7 +291,7 @@ std::vector<Item> fetch(Store &store) {
             i.source = "bakalari";
             i.klass = s(e.at_key("Sender"), "Name");
             i.title = s(e, "Title");
-            i.body = teams::plain_text(s(e, "Text"));
+            i.body = text::plain_text(s(e, "Text"));
             // a "see attached" message is empty text: name the files, same marker teams writes
             simdjson::dom::array atts;
             if (!e.at_key("Attachments").get_array().get(atts)) {
@@ -308,6 +309,44 @@ std::vector<Item> fetch(Store &store) {
             i.event_at = classify::epoch(sent);
             i.url = web("komens.aspx");
             i.src_uid = "komens:" + id;
+            out.push_back(std::move(i));
+        }
+    }
+
+    // whole-day events (holidays, ředitelské volno) before the grid: they go into the same
+    // lessons rows, as a note per day, so an empty week says why it is empty
+    std::map<std::string, std::string> day_note;
+    {
+        // wide enough back that a holiday which started weeks ago still covers today
+        Json j(api("/api/3/events/my?from=" + ymd(now() - 90 * DAY) +
+                   "&to=" + ymd(now() + 60 * DAY)));
+        for (auto e : arr(j.root, "Events", "events")) {
+            std::string id = s(e, "Id");
+            if (id.empty()) continue;
+            // the span sits in Times[]; some deployments hoist the start to the top level
+            std::string start = s(e, "StartTime"), end, title = s(e, "Title");
+            bool whole = false;
+            for (auto t : jarr(e, "Times")) {
+                if (start.empty()) start = s(t, "StartTime");
+                end = s(t, "EndTime");
+                whole = jflag(t, "WholeDay");
+                break;
+            }
+            if (whole && !start.empty() && !title.empty()) {
+                long long a = classify::epoch(start);
+                long long b = end.empty() ? a : classify::epoch(end);
+                // a runaway range would write a note per day for years
+                for (long long d = a; d <= b && d - a <= 400 * DAY; d += DAY) day_note[ymd(d)] = title;
+            }
+            Item i;
+            i.source = "bakalari";
+            i.kind = "info";
+            i.klass = s(e.at_key("EventType"), "Name");
+            i.title = title;
+            i.body = text::plain_text(s(e, "Description"));
+            i.event_at = classify::epoch(start);
+            i.url = web("planakci.aspx");
+            i.src_uid = "event:" + id;
             out.push_back(std::move(i));
         }
     }
@@ -349,8 +388,17 @@ std::vector<Item> fetch(Store &store) {
                 out.push_back(std::move(i));
             }
         }
-        if (!monday.empty())
-            store.put_lessons("bakalari", monday, ymd(classify::epoch(monday) + 6 * DAY), grid);
+        if (monday.empty()) continue;
+        std::string sunday = ymd(classify::epoch(monday) + 6 * DAY);
+        // an hourless row is a day note, not a lesson; view::timetable splits them back out
+        for (const auto &[date, note] : day_note)
+            if (date >= monday && date <= sunday) {
+                Lesson n;
+                n.date = date;
+                n.subject = note;
+                grid.push_back(std::move(n));
+            }
+        store.put_lessons("bakalari", monday, sunday, grid);
     }
 
     // the recurring grid, what the table falls back to out of season. it changes per semester,
@@ -361,7 +409,7 @@ std::vector<Item> fetch(Store &store) {
         std::vector<Lesson> grid;
         int idx = 0;
         for (auto day : arr(j.root, "Days", "timetable")) {
-            int dow = (int)num(day, "DayOfWeek");  // 1 = monday; missing means take the order
+            int dow = (int)jnum(day, "DayOfWeek");  // 1 = monday; missing means take the order
             int off = dow >= 1 && dow <= 7 ? dow - 1 : idx;
             idx++;
             if (off > 6) continue;
@@ -374,49 +422,41 @@ std::vector<Item> fetch(Store &store) {
     }
 
     {
-        Json j(api("/api/3/absence/student"));
-        // 0.2 and 20 both mean 20%: which one the school sends is not documented
-        double thr = num(j.root, "PercentageThreshold");
-        if (thr > 0 && thr <= 1) thr *= 100;
-        std::vector<Absence> abs;
-        for (auto e : arr(j.root, "AbsencesPerSubject", "absence")) {
-            Absence a;
-            a.subject = s(e, "SubjectName");
-            if (a.subject.empty()) a.subject = "?";  // upstream sends one nameless row; still counts
-            auto it = by_name.find(a.subject);
-            if (it != by_name.end()) a.subject = it->second;  // marks key on the abbrev
-            a.lessons = (int)num(e, "LessonsCount");
-            // web's Zameškáno is Base alone; Late/Soon/School are tracked apart and don't count
-            a.absent = (int)num(e, "Base");
-            if (a.lessons < 0 || a.absent < 0 || a.absent > a.lessons) continue;
-            a.threshold = thr;
-            abs.push_back(std::move(a));
-        }
-        store.put_absences("bakalari", abs);
-    }
-
-    {
-        Json j(api("/api/3/events/my?from=" + ymd(now() - 14 * DAY) +
-                   "&to=" + ymd(now() + 60 * DAY)));
-        for (auto e : arr(j.root, "Events", "events")) {
-            std::string id = s(e, "Id");
-            if (id.empty()) continue;
-            Item i;
-            i.source = "bakalari";
-            i.kind = "info";
-            i.klass = s(e.at_key("EventType"), "Name");
-            i.title = s(e, "Title");
-            i.body = teams::plain_text(s(e, "Description"));
-            // the start sits in Times[]; some deployments hoist it to the top level
-            std::string start = s(e, "StartTime");
-            if (start.empty()) {
-                auto times = e.at_key("Times").get_array();
-                if (!times.error() && times.value().size()) start = s(times.value().at(0), "StartTime");
+        // out of the school year's timetable range the module answers 400 "Datum je mimo
+        // rozsah rozvrhu.". that is upstream having no data, not a failed fetch — but the
+        // stored absences then belong to an older year, so the note is what the ui shows
+        long st = 0;
+        std::string raw = api("/api/3/absence/student", false, "", &st);
+        if (st) {
+            store.set_state("bakalari.absence_note",
+                            "not updated: " + trim(text::first_line(raw, 80)));
+        } else {
+            Json j(raw);
+            store.set_state("bakalari.absence_note", "");
+            // 0.2 and 20 both mean 20%: which one the school sends is not documented
+            double thr = jnum(j.root, "PercentageThreshold");
+            if (thr > 0 && thr <= 1) thr *= 100;
+            std::vector<Absence> abs;
+            for (auto e : arr(j.root, "AbsencesPerSubject", "absence")) {
+                Absence a;
+                a.subject = s(e, "SubjectName");
+                if (a.subject.empty()) a.subject = "?";  // upstream sends one nameless row; still counts
+                auto it = by_name.find(a.subject);
+                if (it != by_name.end()) a.subject = it->second;  // marks key on the abbrev
+                a.lessons = (int)jnum(e, "LessonsCount");
+                // web's Zameškáno is Base alone; Late/Soon/School are tracked apart and don't count
+                a.absent = (int)jnum(e, "Base");
+                if (a.lessons < 0 || a.absent < 0 || a.absent > a.lessons) continue;
+                a.threshold = thr;
+                abs.push_back(std::move(a));
             }
-            i.event_at = classify::epoch(start);
-            i.url = web("planakci.aspx");
-            i.src_uid = "event:" + id;
-            out.push_back(std::move(i));
+            // /absence/student takes no date: the totals are whatever year upstream calls
+            // current, and Absences[] is the only thing in the payload that dates them
+            std::string last;
+            for (auto d : jarr(j.root, "Absences")) last = std::max(last, s(d, "Date"));
+            store.set_state("bakalari.absence_year",
+                            school_year(last.empty() ? now() : classify::epoch(last)));
+            store.put_absences("bakalari", abs);
         }
     }
 

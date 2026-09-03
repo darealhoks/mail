@@ -83,7 +83,8 @@ std::string access_token() {
 
 bool have_session() { return oauth::have_session(CFG); }
 
-long long last_refresh_at() { return oauth::last_refresh_at(CFG); }
+void forget_access() { oauth::forget_access(CFG); }
+
 
 // an all-uppercase url encodes in qr alphanumeric mode (5.5 bits/char) instead of byte mode
 // (8), which drops login.microsoft.com/device from version 3 to version 2: 25 modules, not 29.

@@ -1,7 +1,6 @@
 // scores classify against the tests/ corpus; built by `make corpus`, not by `all`
 #include <cstdio>
 #include <fstream>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -22,22 +21,18 @@ std::vector<std::string> split_tab(const std::string &l) {
 }  // namespace
 
 int main() {
-    std::ifstream gf("tests/gold.tsv"), cf("tests/corpus.tsv");
-    if (!gf || !cf) {
-        fputs("corpus: tests/gold.tsv or tests/corpus.tsv missing\n", stderr);
+    std::ifstream cf("tests/corpus.tsv");
+    if (!cf) {
+        fputs("corpus: tests/corpus.tsv missing\n", stderr);
         return 2;
     }
-    std::map<std::string, std::string> gold;
-    for (std::string l; std::getline(gf, l);) {
-        auto f = split_tab(l);
-        if (f.size() >= 2) gold[f[0]] = f[1];
-    }
     int n = 0, ok = 0, dl = 0, tasks = 0;
+    // idx, class, date, sender, card flag, text, expected kind
     for (std::string l; std::getline(cf, l);) {
         auto f = split_tab(l);
-        if (f.size() < 6) continue;
+        if (f.size() < 7) continue;
         auto r = classify::run(f[5], f[4] == "A", f[2]);
-        const std::string &want = gold[f[0]];
+        const std::string &want = f[6];
         bool has = want == "task" ? r.task : want == "test" ? r.test : !r.task && !r.test;
         n++;
         if (has) ok++;

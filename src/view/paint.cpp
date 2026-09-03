@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <map>
 
 #include <clocale>
 #include <cwchar>
@@ -13,8 +14,8 @@
 
 #include "classify.h"
 #include "config.h"
-#include "teams.h"
 #include "term.h"
+#include "text.h"
 #include "view.h"
 
 namespace paint {
@@ -22,11 +23,18 @@ namespace paint {
 // wcwidth() needs a utf-8 LC_CTYPE; no main here owns one, so claim it for all three binaries
 static const bool locale_claimed = (setlocale(LC_CTYPE, ""), true);
 
+void term_size(int &rows, int &cols) {
+    struct winsize w {};
+    if (ioctl(1, TIOCGWINSZ, &w) != 0) w = {24, 80, 0, 0};
+    rows = w.ws_row ? w.ws_row : 24;
+    cols = w.ws_col ? w.ws_col : 80;
+}
+
 int term_cols(bool cap) {
     if (!isatty(1)) return 1000;  // piped: no rules, no hard wrap to fight grep
-    struct winsize w {};
-    if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) return !cap || w.ws_col < 100 ? w.ws_col : 100;
-    return 80;
+    int r = 0, c = 0;
+    term_size(r, c);
+    return !cap || c < 100 ? c : 100;
 }
 
 // one utf-8 sequence at i -> codepoint; returns the bytes it spans, 1 on a malformed lead
@@ -127,12 +135,17 @@ static const std::string &acc() {
 
 const char *accent() { return acc().c_str(); }
 
+const char *accent_bold() {
+    static const std::string sgr = "1;" + acc();
+    return sgr.c_str();
+}
+
 const char *accent_bg() {
     static const std::string sgr = "7;" + acc();
     return sgr.c_str();
 }
 
-std::string bg_sgr(const std::string &fg) {
+static std::string bg_sgr(const std::string &fg) {
     if (fg.compare(0, 2, "38") == 0) return "4" + fg.substr(1);  // 38;5;n / 38;2;r;g;b
     return std::to_string(atoi(fg.c_str()) + 10);                // 30-37 -> 40-47, 90-97 -> 100-107
 }
@@ -147,13 +160,13 @@ const char *bar_bg() {
     return sgr.c_str();
 }
 
-const char *kind_color(const std::string &k) {
+static const char *kind_color(const std::string &k) {
     if (k == "test") return "1;35";
     if (k == "task") return "1;33";
     return "1;36";
 }
 
-std::string when(long long due) {
+static std::string when(long long due) {
     struct tm tm {};
     time_t tt = (time_t)due;
     localtime_r(&tt, &tm);
@@ -185,7 +198,7 @@ const char *avg_color(double a) {
     return mark_color(std::string(1, (char)(mark_scale().first + avg_mark(a) - 1)));
 }
 
-const char *due_color(long long due) {
+static const char *due_color(long long due) {
     long long d = due - (long long)time(nullptr);
     if (d < 0) return "1;31";
     if (d < 86400) return "0;31";
@@ -194,7 +207,7 @@ const char *due_color(long long due) {
 }
 
 // urls survive into the body text; make them stand out without breaking the wrap width
-std::string link_up(const std::string &l) {
+static std::string link_up(const std::string &l) {
     if (!color_on()) return l;
     std::string o;
     for (size_t i = 0; i < l.size();) {
@@ -215,7 +228,7 @@ std::string style_up(const std::string &l, unsigned &open) {
         char m;
         const char *on;
     } MK[] = {{'*', "1"}, {'_', "3"}, {'`', "2"}, {'~', "9"}};
-    if (!color_on()) return teams::style_strip(l);
+    if (!color_on()) return text::style_strip(l);
     auto styles = [&] {
         std::string s;
         for (size_t k = 0; k < sizeof MK / sizeof *MK; k++)
@@ -336,6 +349,26 @@ std::string hhmm(const std::string &t) {
     return t.size() > 1 && t[0] == '0' ? t.substr(1) : t;
 }
 
+std::string strip_sgr(const std::string &l) {
+    std::string o;
+    for (size_t i = 0; i < l.size();) {
+        if (l[i] != 27) {
+            o += l[i++];
+            continue;
+        }
+        size_t j = i + 1;
+        if (j < l.size() && l[j] == '[')
+            while (++j < l.size() && (l[j] < 0x40 || l[j] > 0x7e)) {}
+        i = j + 1;
+    }
+    return o;
+}
+
+std::string centre(const std::string &t, size_t w) {
+    size_t n = std::min(w, utf8_len(t)), lead = (w - n) / 2;
+    return std::string(lead, ' ') + plain_cut(t, w - lead);
+}
+
 int open_url(const std::string &url) {
     auto bad = [&](const std::string &why) {
         fprintf(stderr, "%s\n", c("1;31", "cannot open " + (url.empty() ? "an empty url" : url) +
@@ -356,7 +389,7 @@ int open_url(const std::string &url) {
 }
 
 std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
-    std::string ac = std::string("1;") + accent();
+    std::string ac = accent_bold();
     std::vector<Post> out;
     int bucket = -1;
     bool tty = isatty(1);
@@ -380,7 +413,7 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
         std::string posted = date_short(view::ymd_local(i.event_at ? i.event_at : i.fetched_at));
         size_t chips = utf8_len(r.klass) + i.kind.size() + i.source.size() + utf8_len(posted) + 11;
         std::vector<std::string> title =
-            wrap(teams::style_strip(i.title), width > chips + 30 ? width - chips : 30);
+            wrap(text::style_strip(i.title), width > chips + 30 ? width - chips : 30);
         p.lines.push_back((numbered ? c("90", std::to_string(r.n)) + " " : "") +
                           (r.is_new ? c(NEW_CHIP, " NEW ") + " " : "") +
                           c("1", title.empty() ? "" : title[0] + (title.size() > 1 ? "…" : "")) +
@@ -407,7 +440,7 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered) {
         for (const auto &l : wrap(rest, width)) {
             if (l.compare(0, 4, "http") == 0 && l.find(' ') == std::string::npos)
                 p.lines.push_back(c(link.c_str(), l));
-            else p.lines.push_back(l == teams::TASK_NOTE  // set by teams.cpp, not a body line
+            else p.lines.push_back(l == text::TASK_NOTE  // set by teams.cpp, not a body line
                                        ? c("1;33", "<" + l + ">")
                                        : link_up(style_up(l, open)));
         }
@@ -431,8 +464,11 @@ static const char *absence_color(const Absence &a) {
     return "39";
 }
 
-std::vector<std::string> absence_lines(const std::vector<Absence> &rows) {
+std::vector<std::string> absence_lines(const view::Absences &ab) {
+    const std::vector<Absence> &rows = ab.rows;
     std::vector<std::string> out;
+    out.push_back(c("1;90", "absence" + (ab.year.empty() ? "" : " " + ab.year)));
+    if (!ab.note.empty()) out.push_back(c("1;33", ab.note));
     size_t wc = 0, wf = 0;
     std::vector<std::string> frac;
     for (const Absence &a : rows) {
@@ -440,7 +476,7 @@ std::vector<std::string> absence_lines(const std::vector<Absence> &rows) {
         frac.push_back(std::to_string(a.absent) + "/" + std::to_string(a.lessons));
         wf = std::max(wf, utf8_len(frac.back()));
     }
-    std::string ac = std::string("1;") + accent();
+    std::string ac = accent_bold();
     for (size_t n = 0; n < rows.size(); n++) {
         const Absence &a = rows[n];
         char pct[16];
@@ -465,7 +501,7 @@ std::vector<std::string> mark_lines(const view::Marks &m, size_t width) {
     if (!multi) wc = 0;  // one subject: the column would repeat itself every row
     // the NEW chip, the gaps and the gutter the frontends keep to the left of every row
     size_t used = dw + wm + (wc ? wc + 2 : 0) + 12;
-    std::string ac = std::string("1;") + accent();
+    std::string ac = accent_bold();
     std::string period;
     for (const auto &r : m.rows) {
         if (r.period != period) {
@@ -476,7 +512,7 @@ std::vector<std::string> mark_lines(const view::Marks &m, size_t width) {
         std::string d = r.event_at ? date_short(view::ymd_local(r.event_at)) : "";
         d.append(dw - std::min(dw, utf8_len(d)), ' ');
         size_t nw = width > used + 8 ? width - used : 8;
-        std::string full = teams::style_strip(r.note);
+        std::string full = text::style_strip(r.note);
         bool cut = utf8_len(full) > nw;
         std::string note = plain_cut(full, cut ? nw - 1 : nw) + (cut ? "…" : "");
         while (!note.empty() && note.back() == ' ') note.pop_back();
@@ -491,17 +527,43 @@ std::vector<std::string> mark_lines(const view::Marks &m, size_t width) {
         out.push_back(c("1;90", "average " + (multi ? k + " " : "") + p) + "  " +
                       c(avg_color(a), avg_str(a)));
     }
-    if (!m.absences.empty()) {
+    if (!m.absences.rows.empty()) {
         out.push_back("");
-        out.push_back(c("1;90", "absence"));
         for (std::string &l : absence_lines(m.absences)) out.push_back(std::move(l));
+    }
+    return out;
+}
+
+std::vector<std::string> mark_subject_lines(const view::Marks &m,
+                                            std::vector<std::string> &subjects) {
+    std::vector<std::string> out, order;
+    std::map<std::string, std::pair<int, int>> tally;  // subject -> {marks, new}
+    for (const auto &r : m.rows) {
+        if (!tally.count(r.klass)) order.push_back(r.klass);
+        tally[r.klass].first++;
+        tally[r.klass].second += r.is_new;
+    }
+    std::map<std::string, double> newest;  // averages run oldest period first, so the last wins
+    for (const auto &[k, p, a] : m.averages) newest[k] = a;
+    size_t wc = 3;
+    for (const auto &k : order) wc = std::max(wc, utf8_len(k));
+    for (const auto &k : order) {
+        auto it = newest.find(k);
+        // a subject whose marks are none of them gradeable averages to N, not to a blank
+        std::string a = it == newest.end() ? "N" : avg_str(it->second);
+        int n = tally[k].first;
+        out.push_back(c(accent_bold(), plain_cut(k, wc)) + "  " +
+                      c(it == newest.end() ? "39" : avg_color(it->second), a) + "  " +
+                      c("90", std::to_string(n) + (n == 1 ? " mark" : " marks")) +
+                      (tally[k].second ? "  " + c(NEW_CHIP, " NEW ") : ""));
+        subjects.push_back(k);
     }
     return out;
 }
 
 // the grid shows the surname, the last word of "Mgr. Ivona Vítová"; the abbrev stands in when
 // there is no name or the surname is too long to widen a column for
-std::string teacher_of(const Lesson &l) {
+static std::string teacher_of(const Lesson &l) {
     size_t sp = l.teacher_name.find_last_of(' ');
     std::string sur = sp == std::string::npos ? l.teacher_name : l.teacher_name.substr(sp + 1);
     return sur.empty() || utf8_len(sur) > 13 ? l.teacher : sur;
@@ -510,28 +572,35 @@ std::string teacher_of(const Lesson &l) {
 std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t ch, int rows,
                                     int cols, Geom &g) {
     static const char *NOW_BG = "104;30";  // the lesson happening right now: whole cell
-    static const char *DAYNAME[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
-    std::string ac = std::string("1;") + accent();
+    std::string ac = accent_bold();
     std::vector<std::string> out;
     g.nd = tt.days.size();
     g.nh = tt.hours.size();
     bool fills = rows > 0;  // the tui owns a pane; the cli just prints the block and moves on
-    // "◂ week 17. 8. ▸": the arrows are the tui's week control, the label opens the menu, and the
+    // "< week 17. 8. >": the arrows are the tui's week control, the label opens the menu, and the
     // columns they land on go into g. a permanent grid says so — it is no promise about a date
     bool perm_only = tt.monday == PERM_MONDAY;  // the permanent grid picked on its own
     std::string label = perm_only ? "permanent" : "week " + date_short(tt.monday);
-    std::string header = (fills ? c("90", "◂") + " " : "") + c(ac.c_str(), label) +
-                         (fills ? " " + c("90", "▸") : "") +
-                         (tt.permanent && !perm_only ? c("1;33", "  permanent") : "");
-    if (fills) {
-        g.prev = 1;
-        g.lbl0 = 3;
-        g.lbl1 = 2 + utf8_len(label);
-        g.next = g.lbl1 + 2;
+    g.lab = utf8_len(label);
+    g.hdr = 0;
+    std::string header = (fills ? c("90", "<") + " " : "") + c(ac.c_str(), label) +
+                         (fills ? " " + c("90", ">") : "") +
+                         (tt.permanent && !perm_only ? c("1;33", "  permanent — no timetable available") : "");
+    // a whole-day event is usually why a week is empty; it belongs on the grid, not only in
+    // the feed. runs of days with the same title collapse into one dated range
+    std::vector<std::string> notes;
+    for (size_t i = 0; i < tt.notes.size();) {
+        size_t j = i;
+        while (j + 1 < tt.notes.size() && tt.notes[j + 1].second == tt.notes[i].second) j++;
+        std::string span = date_short(tt.notes[i].first);
+        if (j > i) span += " – " + date_short(tt.notes[j].first);
+        notes.push_back(c("1;33", tt.notes[i].second) + c("90", "  " + span));
+        i = j + 1;
     }
     if (!g.nd || !g.nh) {
-        g.hdr = g.left = 0;  // the header is the whole block: no centring to offset it by
+        g.left = 0;  // the header is the whole block: no centring to offset it by
         out.push_back(header + c("90", " — no lessons"));
+        for (auto &n : notes) out.push_back(n);
         return out;
     }
     // the widest cell content decides the width; vertical room decides how many lines a cell gets
@@ -556,10 +625,7 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
     g.cw = cw;
     g.blk = cell_rows + 1;  // the rule under each day belongs to its block
 
-    auto centre = [&](const std::string &t) {
-        size_t n = std::min(cw, utf8_len(t)), l = (cw - n) / 2;
-        return std::string(l, ' ') + plain_cut(t, cw - l);
-    };
+    auto mid = [&](const std::string &t) { return centre(t, cw); };
     std::string bar = "│";
     std::string rule;
     for (size_t i = 0; i < g.gut; i++) rule += "─";
@@ -571,11 +637,12 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
 
     std::vector<std::string> hd(head - 1, std::string(g.gut, ' '));
     for (size_t h = 0; h < g.nh; h++) {
-        hd[0] += c("90", bar) + c("1", centre(tt.hours[h]));
+        hd[0] += c("90", bar) + c("1", mid(tt.hours[h]));
         for (size_t r = 1; r < hd.size(); r++)
-            hd[r] += c("90", bar) + c("90", centre(r == 1 ? L.t0[h] : L.t1[h]));
+            hd[r] += c("90", bar) + c("90", mid(r == 1 ? L.t0[h] : L.t1[h]));
     }
     out.push_back(header);
+    for (auto &n : notes) out.push_back(n);
     for (const auto &h : hd) out.push_back(h + c("90", bar));
     out.push_back(c("90", rule));
     g.top = out.size();
@@ -673,10 +740,6 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
     out.insert(out.begin(), pad, std::string());
     g.top += pad;
     g.hdr = pad;
-    g.prev += g.left;
-    g.lbl0 += g.left;
-    g.lbl1 += g.left;
-    g.next += g.left;
     return out;
 }
 

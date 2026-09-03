@@ -8,13 +8,8 @@ namespace outlook {
 
 // inbox delta; rides the teams graph token, so the session is teams' session
 std::vector<Item> fetch(Store &st);
-bool have_session();
-std::string session_error();
 // signs teams in if needed, then confirms an unbounded cold sync before maild may run one
 int login_interactive();
-
-// zero-width padding out of a preheader; exposed for selfcheck
-std::string strip_invisible(const std::string &s);
 
 // sync mode from config, clamped to the known set
 std::string mode();

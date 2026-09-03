@@ -37,16 +37,17 @@ $(BUILD)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -MMD -MP -c -o $@ $<
 
+$(BUILD)/$(NAME)-check: $(BUILD)/src/tests/main.o $(COMMON_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
+
 corpus: $(BUILD)/corpus_check
 	$(BUILD)/corpus_check
 
 $(BUILD)/corpus_check: $(BUILD)/src/sources/corpus_check.o $(BUILD)/src/sources/classify.o
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
-check: all corpus
-	$(BUILD)/$(NAME)d --selfcheck
-	$(BUILD)/$(NAME)c --selfcheck
-	$(BUILD)/$(NAME)t --selfcheck
+check: $(BUILD)/$(NAME)-check corpus
+	$(BUILD)/$(NAME)-check
 
 check-asan:  # system gcc lacks the sanitize USE flag
 	$(MAKE) clean
@@ -63,6 +64,6 @@ uninstall:
 clean:
 	rm -rf $(BUILD)
 
--include $(COMMON_OBJ:.o=.d) $(BUILD)/src/maild/main.d $(BUILD)/src/cli/cli.d $(BUILD)/src/tui/tui.d
+-include $(COMMON_OBJ:.o=.d) $(BUILD)/src/maild/main.d $(BUILD)/src/cli/cli.d $(BUILD)/src/tui/tui.d $(BUILD)/src/tests/main.d
 
 .PHONY: all corpus check check-asan install uninstall clean

@@ -18,7 +18,8 @@ void device_poll(const DeviceCode &dc);
 std::string access_token();
 
 bool have_session();
-long long last_refresh_at();  // unix seconds, 0 if never
+// drop the cached access token; graph can reject one before its nominal expiry
+void forget_access();
 
 // device-code sign-in on the tty: prints url, code and qr, then blocks. 0 = signed in
 int login_interactive();

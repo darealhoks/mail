@@ -70,8 +70,8 @@ const struct {
      "# inbox; the last two ask before they run", ""},
     {"table", "what a timetable cell carries; each one off makes the grid narrower", ""},
     {"school", "H1 end date MM-DD (year rolls 1 Aug), average rounding floors, mark scale, percent floors 1..4", ""},
-    {"key", "single-key mode switch in the tui; \"<char> = feed|marks|table\"",
-     "f          = feed\nm          = marks\nt          = timetable\n"},
+    {"key", "single-key mode switch in the tui; \"<char> = feed|marks|table|absence\"",
+     "f          = feed\nm          = marks\nt          = timetable\nb          = absence\n"},
     {"bind", "your own words for a command; a bind wins over the builtin verb of that name",
      "rozvrh     = timetable\n# t        = next -s\n"},
     {"classes", "short name for a raw class name the heuristic gets wrong; \"<raw> = <short>\"",
@@ -184,6 +184,8 @@ int half(const struct tm &tm) {
 }
 
 }  // namespace
+
+void config_parse(std::istream &in, Config &c) { parse(in, c, true); }
 
 std::string Config::str(const std::string &key) const {
     auto it = v.find(key);
@@ -345,55 +347,43 @@ std::pair<char, char> mark_scale() {
     return {s[0], s[d + 1]};
 }
 
-int config_check() {
-    Config c;
-    std::istringstream in("# c\n[general]\nlimit = 7\nlinks = yes\nblacklist = ANJ, Mat\n"
-                          "[source.bakalari]\nurl=http://x\nenabled = no\n[school]\npoints=80,60\n");
-    parse(in, c, true);
-    if (c.num("general.limit") != 7 || !c.flag("general.links") ||
-        c.list("general.blacklist") != std::vector<std::string>{"anj", "mat"} ||
-        c.str("source.bakalari.url") != "http://x" || c.flag("source.bakalari.enabled") ||
-        !c.str("general.missing").empty())
-        return 1;
-
-    Config head;  // keys before any header are dropped, not filed under [general]
-    std::istringstream lin("limit = 3\n[general]\nnotify = x\n");
-    parse(lin, head, true);
-    if (head.num("general.limit") != 0 || head.str("general.notify") != "x") return 1;
-
-    if (html_unescape("&#xD800;a&#65;") != "&#xD800;aA") return 1;  // lone surrogate stays literal
-
-    if (points_mark(95) != 1 || points_mark(80) != 2 || points_mark(10) != 5) return 1;
-    if (mark_scale() != std::pair<char, char>{'1', '5'}) return 1;
-    if (avg_mark(1.49) != 1 || avg_mark(1.5) != 2 || avg_mark(2.49) != 2 || avg_mark(5) != 5)
-        return 1;
-    if (seed_file().find("client_id") != std::string::npos) return 1;
-    if (seed_file().find("[source.teams]\nenabled") == std::string::npos) return 1;
-
-    {  // config_save round-trip, in a throwaway config home
-        std::string dir = "/tmp/" APP_NAME "-cfgcheck-" + std::to_string(getpid());
-        mkdir(dir.c_str(), 0700);
-        const char *old = getenv("XDG_CONFIG_HOME");
-        std::string keep = old ? old : "";
-        setenv("XDG_CONFIG_HOME", dir.c_str(), 1);
-        std::ofstream(config_path()) << "[source.bakalari]\nurl        = \n";
-        bool ok = config_save("source.bakalari.url", "http://y");
-        ok = ok && config_save("source.bakalari.enabled", "no");  // key absent, section present
-        Config back;
-        std::ifstream f(config_path());
-        parse(f, back, true);
-        std::ostringstream raw;
-        raw << std::ifstream(config_path()).rdbuf();
-        std::string text = raw.str();
-        if (text.find("[source.bakalari]", text.find("[source.bakalari]") + 1) != std::string::npos)
-            ok = false;  // no second header for a key added to an existing section
-        if (back.flag("source.bakalari.enabled")) ok = false;
-        unlink(config_path().c_str());
-        rmdir((dir + "/" APP_NAME).c_str());
-        rmdir(dir.c_str());
-        if (old) setenv("XDG_CONFIG_HOME", keep.c_str(), 1);
-        else unsetenv("XDG_CONFIG_HOME");
-        if (!ok || back.str("source.bakalari.url") != "http://y") return 1;
+// [key] section: "<char> = feed|marks|table|absence"; unset falls back to f/m/t/b
+std::map<char, std::string> key_modes() {
+    static const char *NAMES[] = {"feed", "marks", "table", "absence"};
+    std::map<char, std::string> k{{'f', "feed"}, {'m', "marks"}, {'t', "table"}, {'b', "absence"}};
+    for (const auto &[key, val] : config().v) {
+        if (key.compare(0, 4, "key.") || key.size() != 5) continue;
+        for (const char *n : NAMES)
+            if (val == n) k[key[4]] = n;
+        if (val == "timetable") k[key[4]] = "table";
     }
-    return 0;
+    return k;
+}
+
+std::vector<std::string> expand_bind(const std::vector<std::string> &args) {
+    static const char *TAKES_VAL[] = {"-n", "--limit", "-b", "--blacklist", "-f", "--format"};
+    std::vector<std::string> out;
+    bool tried = false;
+    for (size_t a = 0; a < args.size(); a++) {
+        const std::string &t = args[a];
+        bool val = false;
+        for (const char *f : TAKES_VAL) val |= t == f;
+        if (val) {
+            out.push_back(t);
+            if (a + 1 < args.size()) out.push_back(args[++a]);
+            continue;
+        }
+        if (!tried && !t.empty() && t[0] != '-') {
+            tried = true;
+            std::istringstream in(config().str("bind." + lower(t)));
+            std::string w;
+            if (in >> w) {
+                do out.push_back(w);
+                while (in >> w);
+                continue;
+            }
+        }
+        out.push_back(t);
+    }
+    return out;
 }

@@ -1,233 +1,19 @@
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
-#include <fstream>
 #include <vector>
 
 #include <ctime>
 #include <unistd.h>
 
-#include "config.h"
-#include "classify.h"
-#include "json.h"
+#include "http.h"
 #include "notify.h"
 #include "oauth.h"
 #include "registry.h"
-#include "http.h"
 #include "store.h"
-#include "view.h"
-#include "paint.h"
-#include "outlook.h"
-#include "teams.h"
 
 namespace {
-
-#define CHECK(cond)                                                       \
-    do {                                                                  \
-        if (!(cond)) {                                                    \
-            fprintf(stderr, "selfcheck failed: %s (%d)\n", #cond, __LINE__); \
-            return 1;                                                     \
-        }                                                                 \
-    } while (0)
-
-int classify_check() {
-    struct C {
-        const char *text;
-        bool card;
-        const char *dl, *tags;
-    } cases[] = {
-        {"Test 16. 4. Připomínám, že 16. 4. píšete opakovací test", false, "2026-04-16", "test"},
-        {"Desetiminutovka - rovnice a nerovnice / Termín splnění 9. dub", true, "2026-04-09",
-         "test+task"},
-        {"Náhradní termín - kmitání - pátek 17. 4. 8:55 učebna 309.", false, "2026-04-17T08:55",
-         "test"},
-        {"Opravný test - opravu si napíšete ve středu 8. ledna ve 14:30", false,
-         "2026-01-08T14:30", "test"},
-        {"Metody / Due Jan 21", true, "2026-01-21", "task"},
-        {"Mluvní cvičení J. K. Tyl - Fidlovačka", false, "", "task"},
-        {"Domácí úkol - příprava na test / Termín splnění 11. bře", true, "2026-03-11", "task"},
-        {"Aktivace účtu u Autodesku Prosím všechny studenty, aby si nejpozději do 2. 2. "
-         "aktivovali účet",
-         false, "2026-02-02", "task"},
-        {"Zrušení hodiny Dobrý den, dnešní hodina 12. 1. je bohužel zrušena", false, "", ""},
-        {"Opakování - Výstavba literárního díla", false, "", ""},
-        {"📢 Změnil se termín splnění zadání.", false, "", ""},
-        {"class TestBot(BotAI): import random", false, "", ""},
-    };
-    for (const auto &c : cases) {
-        auto r = classify::run(c.text, c.card, "2026-01-15");
-        std::string got = std::string(r.test ? "test" : "") + (r.test && r.task ? "+" : "") +
-                          (r.task ? "task" : "");
-        if (got != c.tags || r.deadline != c.dl) {
-            fprintf(stderr, "classify: want %s,%s got %s,%s: %s\n", c.tags, c.dl, got.c_str(),
-                    r.deadline.c_str(), c.text);
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-int outlook_check() {
-    config().set("source.outlook.sync", "");
-    CHECK(outlook::mode() == "recent");            // unset and junk both fall back
-    config().set("source.outlook.sync", "every");
-    CHECK(outlook::mode() == "recent");
-    CHECK(outlook::cold_size(4000, 12) == 12);     // recent/unread cost the unread count
-    config().set("source.outlook.sync", "unread");
-    CHECK(outlook::mode() == "unread" && outlook::cold_size(4000, 12) == 12);
-    config().set("source.outlook.sync", "all");
-    CHECK(outlook::mode() == "all" && outlook::cold_size(4000, 12) == 4000);
-    config().set("source.outlook.sync", "recent");
-    CHECK(outlook::strip_invisible("a\u200c\u200b b\ufeff") == "a b");  // preheader padding
-    CHECK(outlook::strip_invisible("\u2013 dash stays") == "\u2013 dash stays");
-    return 0;
-}
-
-int selfcheck() {
-    CHECK(classify_check() == 0);
-    CHECK(config_check() == 0);
-    CHECK(outlook_check() == 0);
-    Json j(R"({"a":"x\ny","n":42})");
-    CHECK(j.str("a") == "x\ny");
-    CHECK(j.num("n") == 42);
-    CHECK(j.str("n", "def") == "def");     // wrong type -> default
-    CHECK(j.num("missing", -1) == -1);
-    bool threw = false;
-    try {
-        Json bad("{not json");
-    } catch (const std::exception &) {
-        threw = true;
-    }
-    CHECK(threw);
-
-    auto item = [](const char *src) {
-        Item i;
-        i.source = src;
-        i.klass = "3.A";
-        i.kind = "post";
-        i.title = "t";
-        i.src_uid = "uid1";
-        return i;
-    };
-    std::string tmp = "/tmp/" APP_NAME "d-selfcheck.db";
-    remove(tmp.c_str());
-    {
-        Store s(tmp);
-        CHECK(s.insert_item(item("teams")));
-        CHECK(!s.insert_item(item("teams")));
-        CHECK(s.insert_item(item("othersrc")));
-        CHECK(s.last_ok_fetch("teams") == 0);
-        s.log_fetch("teams", 100, false, "boom", 0);
-        CHECK(s.last_ok_fetch("teams") == 0);
-        s.log_fetch("teams", 100, true, "", 1);
-        CHECK(s.last_ok_fetch("teams") > 0);
-        CHECK(s.last_fetch("teams").failing_since == 0);
-        s.log_fetch("teams", 100, false, "boom", 0);
-        long long first = s.last_fetch("teams").failing_since;
-        s.log_fetch("teams", 100, false, "boom", 0);
-        CHECK(first && s.last_fetch("teams").failing_since == first);
-
-        for (const Source &src : sources()) s.log_fetch(src.name, 100, false, OFFLINE_TAG "x", 0);
-        CHECK(view::offline(s));
-        CHECK(view::gripes(s).size() == 1 && !view::gripes(s)[0].error);
-        s.log_fetch(sources()[0].name, 100, false, "http: boom", 0);
-        CHECK(!view::offline(s));
-    }
-    remove(tmp.c_str());
-
-    {
-        Store s(tmp);
-        CHECK(s.get_state("k").empty());
-        s.set_state("k", "v1");
-        s.set_state("k", "v2");
-        CHECK(s.get_state("k") == "v2");
-        s.defer = true;
-        s.set_state("k", "v3");
-        CHECK(s.get_state("k") == "v2");  // queued, not written
-        s.flush();
-        CHECK(s.get_state("k") == "v3" && !s.defer);
-        s.defer = true;
-        s.set_state("k", "v4");
-        s.drop_deferred();
-        CHECK(s.get_state("k") == "v3" && !s.defer);
-        CHECK(s.insert_item(item("teams")));
-    }
-    remove(tmp.c_str());
-
-    {
-        Store s(tmp);
-        Item i = item("teams");
-        i.title = "a\x1b[31mb";
-        CHECK(s.insert_item(i));
-        CHECK(s.feed().at(0).title == "a[31mb");
-    }
-    remove(tmp.c_str());
-
-    {
-        Store s(tmp);
-        long long now = (long long)time(nullptr);
-        auto add = [&](const char *uid, const char *kind, long long due, long long ev) {
-            Item i = item("teams");
-            i.src_uid = uid;
-            i.title = uid;
-            i.kind = kind;
-            i.due_at = due;
-            i.event_at = ev;
-            CHECK(s.insert_item(i));
-            return 0;
-        };
-        CHECK(add("old", "task", now - 90 * 86400, 0) == 0);   // past the 30d window
-        CHECK(add("task", "task", 0, now - 3 * 86400) == 0);
-        CHECK(add("post", "post", 0, now) == 0);
-        auto f = s.feed();
-        CHECK(f.size() == 2);                                  // overdue term-old task dropped
-        CHECK(f[0].title == "post" && f[1].title == "task");   // undated actionables sink
-    }
-    remove(tmp.c_str());
-
-    CHECK(teams::plain_text("<p>a<br/>b</p><div>c &amp;amp; d</div>") == "a\nb\nc & d");
-    CHECK(teams::plain_text("see https://x.y/z now") == "see https://x.y/z now");
-    CHECK(teams::plain_text("<a href=\"https://x.y/z\">https://x.y/z</a>.") == "https://x.y/z .");
-    CHECK(teams::plain_text("&#268;au&nbsp;&#268;au") == "Čau Čau");
-    CHECK(teams::plain_text("<div></div>  ") == "");
-    CHECK(teams::plain_text("<b>tučně</b> a <i>kurzíva</i>") == "*tučně* a _kurzíva_");
-    CHECK(teams::plain_text("<p><strong> dvě slova </strong>tady</p>") == "*dvě slova* tady");
-    CHECK(teams::plain_text("<b><i>obě</i></b>") == "*_obě_*");
-    CHECK(teams::plain_text("<b> </b>x") == "x");   // empty span leaves no marker behind
-    CHECK(teams::plain_text("</b>x") == "x");       // stray close is not a marker
-    CHECK(teams::plain_text("<b>https://x.y/z</b>") == "*https://x.y/z*");
-    CHECK(teams::style_strip("*a* _b_") == "a b");
-    {  // a span split by the wrap reopens on the next line; colour depends on the tty
-        unsigned open = 0;
-        std::string a = paint::style_up("*a", open), b = paint::style_up("c*", open);
-        CHECK(open == 0);
-        CHECK(a.find('*') == std::string::npos && a.find('a') != std::string::npos);
-        CHECK(b.find('*') == std::string::npos && b.find('c') != std::string::npos);
-        CHECK(a.find("\033[1m") != std::string::npos || a == "a");
-        CHECK((a.find("\033[1m") == std::string::npos) == (b.find("\033[1m") == std::string::npos));
-    }
-
-    CHECK(classify::epoch("2026-08-16T00:00:00+02:00") == 1786838400);
-    CHECK(classify::epoch("2026-08-16T14:30") == 1786890600);
-    CHECK(classify::epoch("nope") == 0);
-
-    // hook args are remote text: one quoting slip and the shell runs it
-    std::string nf = "/tmp/" APP_NAME "d-notify";
-    config().set("general.notify", "printf '%s|' >" + nf);
-    notify(2, "You've got mail", "$(touch /tmp/pwned)\n+1 tests", ICON_MAIL);
-    std::ifstream nfs(nf);
-    std::string got((std::istreambuf_iterator<char>(nfs)), std::istreambuf_iterator<char>());
-    CHECK(got == "2|You've got mail|$(touch /tmp/pwned)\n+1 tests|" ICON_MAIL "|");
-    CHECK(access("/tmp/pwned", F_OK) != 0);
-    remove(nf.c_str());
-    config().set("general.notify", "");
-
-    puts(APP_NAME "d: selfcheck ok");
-    return 0;
-}
 
 // items table kinds -> what the notification calls them, always plural
 const struct {
@@ -240,17 +26,8 @@ int fetch_all(bool cold_flag) {
     int rc = 0;
     std::map<std::string, int> fresh_kinds;
     // every cursor key is namespaced by its source; a cold run drops the lot and rescrapes
-    bool tty = isatty(2);
-    for (const Source &src : sources()) {
-        if (cold_flag) store.clear_state(std::string(src.name) + ".%");
-        if (!src.progress) continue;
-        *src.progress = [tty, name = std::string(src.name)](size_t done, size_t total,
-                                                            const std::string &what) {
-            if (!tty) return;
-            fprintf(stderr, "\r%s: %zu/%zu  %-30.30s", name.c_str(), done, total, what.c_str());
-            if (done == total) fputs("\r\033[K", stderr);
-        };
-    }
+    if (cold_flag)
+        for (const Source &src : sources()) store.clear_state(std::string(src.name) + ".%");
     // inside a catch: a throwing log would escape run() and cost every source after this one
     auto log_fail = [&](const char *name, long long started, const char *err) {
         try {
@@ -290,19 +67,16 @@ int fetch_all(bool cold_flag) {
             }
             store.log_fetch(name, started, true, "", cold ? 0 : fresh);
             store.set_state(std::string("expired.") + name, "");
-            if (cold) {
-                std::string ys;
-                for (const auto &y : active_years()) ys += (ys.empty() ? "" : ", ") + y;
-                printf("%s: cold run, backfilled %s\n", name, ys.c_str());
-            } else printf("%s: %d new\n", name, fresh);
+            printf("%s: %s%d new\n", name, cold ? "cold run, " : "", fresh);
         } catch (const SessionExpired &e) {
             log_fail(name, started, e.what());
             fprintf(stderr, "%s: %s\n", name, e.what());
             rc = 1;
-            // one notification per outage; cleared by the next fetch that works
+            // the verdict the frontends read: they never probe a session themselves. also
+            // dedupes the notification to one per outage; cleared by the next fetch that works
             std::string flag = std::string("expired.") + name;
             if (store.get_state(flag).empty()) {
-                store.set_state(flag, "1");
+                store.set_state(flag, e.what());
                 notify(2, std::string(name) + " signed out",
                        APP_NAME "c auth " + std::string(name), ICON_LOCK);
             }
@@ -329,8 +103,7 @@ int main(int argc, char **argv) {
         setvbuf(stdout, nullptr, _IOLBF, 0);  // stdout is a log pipe under cron
         bool cold = false;
         for (int i = 1; i < argc; i++) {
-            if (!strcmp(argv[i], "--selfcheck")) return selfcheck();
-            else if (!strcmp(argv[i], "--cold")) cold = true;
+            if (!strcmp(argv[i], "--cold")) cold = true;
             else {
                 fprintf(stderr, "usage: " APP_NAME "d [--cold]\n");
                 return 2;

@@ -53,12 +53,15 @@ std::string abbrev(const std::string &raw) {
     return raw;
 }
 
-bool matches(const Item &i, const std::vector<std::string> &filters) {
-    for (const auto &f : filters)
-        if (f != fold(i.kind) && f != fold(abbrev(i.klass)) && f != fold(i.source)) return false;
-    return true;
+std::vector<std::string> fold_all(const std::vector<std::string> &words) {
+    std::vector<std::string> out;
+    for (const auto &w : words) out.push_back(fold(w));
+    return out;
 }
 
+namespace {
+
+// "new" = id above the watermark the last listing left behind; ids grow with insertion order
 long long watermark(Store &s, const char *key) { return atoll(s.get_state(key).c_str()); }
 
 void set_watermark(Store &s, const char *key, const std::vector<Item> &items) {
@@ -66,6 +69,8 @@ void set_watermark(Store &s, const char *key, const std::vector<Item> &items) {
     for (const auto &i : items) m = std::max(m, i.id);
     s.set_state(key, std::to_string(m));
 }
+
+}  // namespace
 
 std::string ymd_local(long long t) {
     struct tm tm {};
@@ -116,7 +121,7 @@ std::string ago(long long t) {
     return t ? rel_span((long long)time(nullptr) - t) + " ago" : "never";
 }
 
-std::string dur(long long s) {
+static std::string dur(long long s) {
     if (s % 3600 == 0) return std::to_string(s / 3600) + "h";
     if (s % 60 == 0) return std::to_string(s / 60) + "m";
     return std::to_string(s) + "s";
@@ -234,23 +239,30 @@ Marks marks_rows(Store &s, const std::vector<std::string> &filters, size_t limit
     }
     if (config().flag("general.marks_newest_last")) std::reverse(out.rows.begin(), out.rows.end());
 
-    for (const Absence &a : s.absences())
-        if (std::find(ab.begin(), ab.end(), a.subject) != ab.end()) out.absences.push_back(a);
+    out.absences = absence_rows(s, {});
+    std::vector<Absence> keep;
+    for (Absence &a : out.absences.rows)
+        if (std::find(ab.begin(), ab.end(), a.subject) != ab.end()) keep.push_back(std::move(a));
+    out.absences.rows = keep;
     return out;
 }
 
-std::vector<Absence> absence_rows(Store &s, const std::vector<std::string> &filters) {
-    std::vector<Absence> out;
+Absences absence_rows(Store &s, const std::vector<std::string> &filters) {
+    Absences out;
     for (Absence &a : s.absences()) {
         if (!filters.empty()) {
             if (std::find(filters.begin(), filters.end(), fold(a.subject)) == filters.end()) continue;
         } else if (blacklisted(a.subject, abbrev(a.subject))) continue;
-        out.push_back(std::move(a));
+        out.rows.push_back(std::move(a));
     }
+    // bakalari stamps the year it actually got the totals for; before the first fetch there is
+    // nothing to label, and "this year" would be a guess dressed as a fact
+    out.year = s.get_state("bakalari.absence_year");
+    out.note = s.get_state("bakalari.absence_note");
     return out;
 }
 
-void compact(Timetable &t) {
+static void compact(Timetable &t) {
     // an hour nobody has all week (a 0th hour, the long tail) is not a column worth its width
     auto used = [&](size_t d, size_t h) { return t.grid[d * t.hours.size() + h] != nullptr; };
     std::vector<size_t> keep_h, keep_d;
@@ -274,9 +286,14 @@ void compact(Timetable &t) {
 Timetable timetable(Store &s, const std::string &monday) {
     Timetable t;
     t.monday = monday.empty() ? wanted_monday() : monday;
-    t.rows = s.lessons(t.monday, ymd_plus(t.monday, 6));
+    std::vector<Lesson> stored = s.lessons(t.monday, ymd_plus(t.monday, 6));
+    // an hourless row is a whole-day event, not a lesson (bakalari.cpp writes them together)
+    for (Lesson &l : stored) {
+        if (l.hour.empty()) t.notes.push_back({l.date, l.subject});
+        else t.rows.push_back(std::move(l));
+    }
     t.permanent = t.monday == PERM_MONDAY;  // picked explicitly: the stored week is the grid
-    if (t.rows.empty()) {  // out of season, or a week outside what maild fetched
+    if (t.rows.empty()) {  // out of season, a holiday week, or one maild has not fetched
         t.rows = s.lessons(PERM_MONDAY, PERM_SUNDAY);
         t.permanent = !t.rows.empty();
         // PERM_MONDAY is the 5th: the day of month carries the weekday offset
@@ -338,50 +355,46 @@ bool offline(Store &s) {
     return any;
 }
 
-std::vector<SourceStatus> status(Store &s) {
-    std::vector<SourceStatus> out;
-    bool off = offline(s);
+Health health(Store &s) {
+    Health h;
+    h.offline = offline(s);
+    if (h.offline) h.gripes.push_back({"no internet, showing last data", "offline", false});
+    long long limit = stale_after(), iv = config().num("general.interval");
+    std::string rate = iv ? " (" + dur(iv) + ")" : "";
+    bool warn = config().flag("general.stale_warn");
     for (const Source &src : sources()) {
         SourceStatus st;
         st.name = src.name;
         st.pretty = src.pretty;
-        st.error = src.session_error();
+        // maild's verdict, read from the store: a frontend never touches the network, and a
+        // server that stalls must not freeze every `mailc` for the length of its timeout
+        st.error = s.get_state("expired." + std::string(src.name));
         st.signed_in = src.have_session();
         if (st.signed_in && st.error.empty()) st.refreshed_at = oauth::last_refresh_at(src.creds);
         st.fetched_at = s.last_ok_fetch(src.name);
-        st.offline = off;
         st.stale = !st.fetched_at || stale_age(st.fetched_at) > stale_after();
-        out.push_back(std::move(st));
-    }
-    return out;
-}
+        if (!st.signed_in || !st.error.empty()) h.unsigned_names.push_back(st.name);
 
-std::vector<Gripe> gripes(Store &s) {
-    std::vector<Gripe> out;
-    bool off = offline(s);
-    if (off) out.push_back({"no internet, showing last data", false});
-    long long limit = stale_after(), iv = config().num("general.interval");
-    std::string rate = iv ? " (" + dur(iv) + ")" : "";
-    for (const Source &source : sources()) {
-        const char *src = source.name;
-        Store::Fetch f = s.last_fetch(src);
+        Store::Fetch f = s.last_fetch(src.name);
         if (!f.at) {
-            if (config().flag("general.stale_warn"))
-                out.push_back({std::string(src) + ": never fetched, is " APP_NAME "d running?",
-                               false});
+            if (warn)
+                h.gripes.push_back({st.name + ": never fetched, is " APP_NAME "d running?",
+                                    st.name + ": never fetched", false});
         } else if (!f.ok) {
-            if (off && f.error.rfind(OFFLINE_TAG, 0) == 0) continue;  // the one line above says it
-            out.push_back({std::string(src) + ": fetch failing since " +
-                               ago(f.failing_since ? f.failing_since : f.at) +
-                               (f.error.empty() ? "" : " — " + f.error),
-                           true});
-        } else if (stale_age(f.at) > limit && config().flag("general.stale_warn")) {
-            out.push_back({std::string(src) + ": data is older than the poll rate" + rate +
-                               ", is " APP_NAME "d running?",
-                           false});
+            // the offline line above already says it
+            if (!(h.offline && f.error.rfind(OFFLINE_TAG, 0) == 0))
+                h.gripes.push_back({st.name + ": fetch failing since " +
+                                        ago(f.failing_since ? f.failing_since : f.at) +
+                                        (f.error.empty() ? "" : " — " + f.error),
+                                    st.name + ": fetch failing", true});
+        } else if (stale_age(f.at) > limit && warn) {
+            h.gripes.push_back({st.name + ": data is older than the poll rate" + rate +
+                                    ", is " APP_NAME "d running?",
+                                st.name + ": stale", false});
         }
+        h.sources.push_back(std::move(st));
     }
-    return out;
+    return h;
 }
 
 NewCounts new_counts(Store &s) {
@@ -391,8 +404,6 @@ NewCounts new_counts(Store &s) {
             (i.kind == "task" || i.kind == "test" ? n.work : n.msgs)++;
     for (const auto &i : s.marks(watermark(s, "seen_marks")))
         if (!blacklisted(i.klass, abbrev(i.klass))) n.marks++;
-    for (const Source &src : sources())
-        if (!src.session_error().empty()) n.unsigned_pretty.push_back(src.pretty);
     return n;
 }
 

@@ -29,7 +29,10 @@ using Expired = std::function<bool(long status, const Json &)>;
 std::string access_token(const Config &c, const Expired &expired);
 
 bool have_session(const Config &c);
-long long last_refresh_at(const Config &c);  // unix seconds, 0 if never
-long long last_refresh_at(const std::string &creds_name);  // creds file == source name
+long long last_refresh_at(const std::string &creds_name);  // unix seconds, 0 if never
+
+// drop the cached access token so the next access_token() must really refresh: the only way
+// to recover from a token a provider invalidated before its nominal expiry
+void forget_access(const Config &c);
 
 }  // namespace oauth

@@ -61,7 +61,7 @@ frontend will draw, clamped to what the terminal holds — never padded past it.
 header takes the widest form that fits, in order: `8:00-8:45`, `00-45`, start over end on
 two rows, none. `view::compact` drops any hour column and any day row nothing occupies, so a
 0th hour or a long tail costs nothing when the week does not use it. In the tui the block is
-centred in the pane both ways. The header line doubles as the week control: `◂` and `▸` step
+centred in the pane both ways. The header line doubles as the week control: `<` and `>` step
 a week, the label opens a menu of this week ±2/+4 — clicked, or `[` `]` `w` from the keyboard.
 The cli prints the same header without the arrows (`rows <= 0`), so a pipe stays plain. Turning a `[table]` key off shrinks the grid: `time = no` alone frees the
 whole header and lets narrow columns hold the subject.
@@ -124,8 +124,9 @@ The hook is run through /bin/sh with wispctl's argv order, each argument single-
 
 Fired by maild only: one grouped "You've got mail" (urgency 0, icon f0e0) per fetch with a
 `+N <kind>` line per kind that gained items, always plural; and one "<source> signed out"
-(urgency 2, icon f023) per outage, gated by state key `expired.<source>` which the next
-successful fetch of that source clears. Cold runs never notify.
+(urgency 2, icon f023) per outage, gated by state key `expired.<source>`, which holds the
+rejection message and is cleared by the next successful fetch of that source. That same key is
+the session verdict every frontend reads. Cold runs never notify.
 
 Staleness is never notified: `mailc` sees it by itself and prints it. Each `maild` run
 publishes `general.interval` to state key `daemon.interval`; anything older than 2x that is a

@@ -71,6 +71,12 @@ long long last_refresh_at(const std::string &creds_name) {
     return it == kv.end() ? 0 : strtoll(it->second.c_str(), nullptr, 10);
 }
 
-long long last_refresh_at(const Config &c) { return last_refresh_at(c.creds_name); }
+void forget_access(const Config &c) {
+    auto kv = creds_load(c.creds_name);
+    kv.erase("access_token");
+    kv.erase("access_expires_at");
+    creds_save(c.creds_name, kv);
+}
+
 
 }  // namespace oauth

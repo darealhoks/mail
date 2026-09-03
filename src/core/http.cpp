@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 
 #include <chrono>
+#include <string>
 #include <stdexcept>
 #include <thread>
 
@@ -50,16 +51,28 @@ HttpResponse perform(CURL *h, std::string &body) {
     curl_easy_setopt(h, CURLOPT_TIMEOUT, 300L);
     curl_easy_setopt(h, CURLOPT_USERAGENT, APP_NAME "/0.1");
     CURLcode rc = curl_easy_perform(h);
-    if (rc != CURLE_OK && body.empty()) {  // no bytes written, so a replay cannot duplicate anything
+    // no bytes written, so a replay cannot duplicate anything. a timeout is not replayed: the
+    // 20s low-speed window already gave up on a link that was answering, and a stalled server
+    // would just cost that window twice per run
+    if (rc != CURLE_OK && rc != CURLE_OPERATION_TIMEDOUT && body.empty()) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         rc = curl_easy_perform(h);
     }
     if (rc != CURLE_OK) {
-        // OFFLINE_TAG is matched in view.cpp: no connectivity is not a fault worth shouting about
+        // OFFLINE_TAG is matched in view.cpp: no connectivity is not a fault worth shouting about.
+        // a timeout or a dropped transfer only counts as offline if the connection never came up —
+        // a server that takes the connection and then stalls is a fault, and must stay loud
+        // primary ip, not connect_time: a retry over a kept-alive connection reports no connect
+        char *ip = nullptr;
+        curl_easy_getinfo(h, CURLINFO_PRIMARY_IP, &ip);
+        bool connected = ip && *ip;
         bool off = rc == CURLE_COULDNT_RESOLVE_HOST || rc == CURLE_COULDNT_RESOLVE_PROXY ||
-                   rc == CURLE_COULDNT_CONNECT || rc == CURLE_OPERATION_TIMEDOUT ||
-                   rc == CURLE_SEND_ERROR || rc == CURLE_RECV_ERROR;
-        throw std::runtime_error(std::string(off ? OFFLINE_TAG : "http: ") + curl_easy_strerror(rc));
+                   rc == CURLE_COULDNT_CONNECT ||
+                   (!connected && (rc == CURLE_OPERATION_TIMEDOUT ||
+                                   rc == CURLE_SEND_ERROR || rc == CURLE_RECV_ERROR));
+        std::string what = curl_easy_strerror(rc);
+        if (!off && rc == CURLE_OPERATION_TIMEDOUT) what = "server accepted the connection and never answered";
+        throw std::runtime_error(std::string(off ? OFFLINE_TAG : "http: ") + what);
     }
     HttpResponse r;
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &r.status);

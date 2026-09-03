@@ -1,4 +1,5 @@
 #pragma once
+#include <iosfwd>
 #include <map>
 #include <string>
 #include <vector>
@@ -16,6 +17,9 @@ struct Config {
     const std::vector<std::string> &list(const std::string &key) const;  // comma list, lowercased
     void set(const std::string &key, const std::string &val) { v[key] = val; }
 };
+
+// ini text -> keys; no defaults filled in, no warnings
+void config_parse(std::istream &in, Config &c);
 
 // persist one key to the config file (in its section, replacing any existing line) and to the
 // parsed config; false if the file could not be written
@@ -45,5 +49,8 @@ int points_mark(double pct);
 // school.mark_scale as digits, e.g. {'1','5'}
 std::pair<char, char> mark_scale();
 
-// ini parser + defaults table, exercised by --selfcheck
-int config_check();
+// [key] section: "<char> = feed|marks|table|absence"; unset falls back to f/m/t/b
+std::map<char, std::string> key_modes();
+// one level of [bind] substitution over the args after argv[0]: the first non-flag word is
+// replaced by its [bind] value split on spaces. no recursion, no shell
+std::vector<std::string> expand_bind(const std::vector<std::string> &args);

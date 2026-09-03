@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "json.h"
 #include "store.h"
 
 namespace teams {
@@ -13,26 +14,18 @@ struct GraphError : std::runtime_error {
     long status;
 };
 
-// graph GET with retry, 401-remint and paging left to the caller; shared with outlook,
-// which rides the same token
+// graph GET with retry and 401-remint; shared with outlook, which rides the same token
 std::string graph_get(std::string &token, const std::string &url,
                       const std::vector<std::string> &extra_headers = {});
 
-// appended to task-bot posts, whose real text graph will not give us (.map/sources.md);
-// frontends render it as a marker, not as body text
-inline const char *TASK_NOTE = "task set in teams only";
-
-// set by maild to report cold-run progress; unset means silent
-extern std::function<void(size_t done, size_t total, const std::string &what)> progress;
+// walk a graph delta feed: resume from the cursor in state[key], cold on the first run or on a
+// cursor upstream rejects, and hand each page's `value` array to `page`. the cursor is stored
+// only when a deltaLink arrives, so a run that stops early never claims to be caught up
+void graph_delta(std::string &token, Store &st, const std::string &key, const std::string &cold,
+                 const std::vector<std::string> &headers,
+                 const std::function<void(simdjson::dom::array)> &page);
 
 // channel-message delta per channel; delta links and the channel list live in store state
 std::vector<Item> fetch(Store &st);
-
-// html -> text, keeping the styling a terminal can show as markers: *bold* _italic_
-// `code` ~strike~; paint::style_up turns them into sgr
-std::string plain_text(const std::string &html);
-// drop the markers again, for text that is painted with its own attributes (titles) or
-// matched against (classification)
-std::string style_strip(const std::string &s);
 
 }  // namespace teams

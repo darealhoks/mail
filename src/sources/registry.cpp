@@ -8,16 +8,13 @@
 
 namespace {
 
-std::string bakalari_error() { return bakalari::have_session() ? "" : "not signed in"; }
-
-// teams and outlook share one refresh token, so they share one probe
+// teams and outlook share one refresh token, so they share one session
 const Source ALL[] = {
-    {"bakalari", "Bakaláři", "bakalari", bakalari::have_session, bakalari_error, bakalari::fetch,
-     bakalari::login_interactive, nullptr},
-    {"teams", "Teams", "teams", teams::have_session, outlook::session_error, teams::fetch,
-     teams::login_interactive, &teams::progress},
-    {"outlook", "Outlook", "teams", outlook::have_session, outlook::session_error, outlook::fetch,
-     outlook::login_interactive, nullptr},
+    {"bakalari", "Bakaláři", "bakalari", bakalari::have_session, bakalari::fetch,
+     bakalari::login_interactive},
+    {"teams", "Teams", "teams", teams::have_session, teams::fetch, teams::login_interactive},
+    {"outlook", "Outlook", "teams", teams::have_session, outlook::fetch,
+     outlook::login_interactive},
 };
 
 }  // namespace

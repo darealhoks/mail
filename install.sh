@@ -65,6 +65,7 @@ next:
   ${NAME}c auth bakalari    # url, username, password
   ${NAME}c auth teams       # device-code sign-in in a browser
   ${NAME}d                  # first fetch; then ${NAME}c for the feed
+  ${NAME}t                  # the same store full-screen; ? lists every key
 
 config is written on first run: ${XDG_CONFIG_HOME:-$HOME/.config}/$NAME/config
 EOF

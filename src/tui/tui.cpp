@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-#include <sys/ioctl.h>
 #ifdef __linux__
 #include <sys/inotify.h>
 #endif
@@ -32,7 +31,7 @@ namespace {
 using namespace paint;
 
 enum Mode { M_FEED, M_MARKS, M_TABLE, M_ABSENCE, M_N };
-const char *MODE_NAME[M_N] = {"feed", "marks", "table", "absence"};
+const char *MODE_NAME[M_N] = {"feed", "marks", "table", "absence"};  // matches config.cpp key_modes()
 
 volatile sig_atomic_t resized = 1;
 void on_winch(int) { resized = 1; }
@@ -76,14 +75,11 @@ long long now_ms() {
     return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
-// [key] section: "<char> = feed|marks|table|absence"; unset falls back to f/m/t/b
 std::map<char, Mode> keymap() {
-    std::map<char, Mode> k{{'f', M_FEED}, {'m', M_MARKS}, {'t', M_TABLE}, {'b', M_ABSENCE}};
-    for (const auto &[key, val] : config().v) {
-        if (key.compare(0, 4, "key.") || key.size() != 5) continue;
+    std::map<char, Mode> k;
+    for (const auto &[ch, name] : key_modes())
         for (int m = 0; m < M_N; m++)
-            if (val == MODE_NAME[m] || (m == M_TABLE && val == "timetable")) k[key[4]] = (Mode)m;
-    }
+            if (name == MODE_NAME[m]) k[ch] = (Mode)m;
     return k;
 }
 
@@ -119,78 +115,40 @@ std::string tabs(Mode mode, const std::map<char, Mode> &keys, size_t &width_used
 
 // the health chip: a dead session first, then a stale source, then plain data age.
 // a failing fetch is a gripe, and gripes live in the statusline
-std::string age_chip(Store &s, bool &red, long long &best) {
+std::string age_chip(const view::Health &h, bool &red, long long &best) {
     best = 0;
     red = false;
-    std::string unsigned_names, stale_names;
-    for (const view::SourceStatus &st : view::status(s)) {
+    std::string stale_names;
+    for (const view::SourceStatus &st : h.sources) {
         if (st.fetched_at > best) best = st.fetched_at;
-        if (st.stale && !st.offline) {
-            red = true;
-            stale_names += (stale_names.empty() ? "" : ", ") + std::string(st.pretty);
-        }
-        if (!st.signed_in || !st.error.empty())
-            unsigned_names += (unsigned_names.empty() ? "" : ", ") + std::string(st.pretty);
+        if (st.stale && !h.offline)
+            stale_names += (stale_names.empty() ? "" : ", ") + st.pretty;
     }
-    if (!unsigned_names.empty()) {
+    if (!h.unsigned_names.empty()) {
         red = true;
-        return unsigned_names + " not signed, press a to sign in";
+        std::string names;
+        for (const std::string &n : h.unsigned_names) names += (names.empty() ? "" : ", ") + n;
+        return names + " not signed, a to sign in";
     }
     if (!stale_names.empty()) return stale_names + " stale";
     if (!best) return "no data yet";
-    long long d = (long long)time(nullptr) - best;
-    return "data " +
-           (d < 60       ? std::string("<1 min")
-            : d < 5400   ? std::to_string(d / 60) + " min"
-            : d < 172800 ? std::to_string(d / 3600) + " hr"
-                         : std::to_string(d / 86400) + " day") +
-           " old";
+    return view::rel_span((long long)time(nullptr) - best) + " old";
 }
 
-// drop out of the tui for the interactive sign-ins, one source after the other
-void auth_all() {
-    leave();
-    for (const Source &src : sources()) {
-        for (int tries = 0; tries < 3 && (!src.have_session() || !src.session_error().empty());
-             tries++) {
-            fputs("\033[H\033[2J", stdout);
-            try {
-                if (src.login() != 0) break;  // empty input backs out of this source
-            } catch (const std::exception &e) {
-                fprintf(stderr, "%s\n", c("1;31", e.what()).c_str());
-                printf("%s ", c("90", "enter to retry, q to skip:").c_str());
-                fflush(stdout);
-                char b[16];
-                if (!fgets(b, sizeof b, stdin) || b[0] == 'q') break;
-            }
-        }
-    }
-    enter();
-}
-
-std::string refresh() {
-    return system(APP_NAME "d >/dev/null 2>&1 &") == 0 ? "fetching" : "refresh failed";
-}
-
-// "data 5 min old" -> "5 min old" -> "5 min" -> "5m"; false once nothing is left to shed
-bool shorten_age(std::string &a) {
-    if (a.compare(0, 5, "data ") == 0) return a.erase(0, 5), true;
-    if (a.size() > 4 && a.compare(a.size() - 4, 4, " old") == 0) return a.erase(a.size() - 4), true;
-    size_t sp = a.rfind(' ');
-    if (sp == std::string::npos) return false;
-    std::string unit = a.substr(sp + 1);
-    if (unit != "min" && unit != "hr" && unit != "day") return false;  // not an age, do not mangle
-    a = a.substr(0, sp) + unit[0];
-    return true;
+bool refresh() {
+    // the trailing & makes system() succeed whatever the daemon does, so look for it first
+    if (system("command -v " APP_NAME "d >/dev/null 2>&1") != 0) return false;
+    return system(APP_NAME "d >/dev/null 2>&1 &") == 0;
 }
 
 // the whole ui keeps this line; tab strip left, transient action in the middle, position right
 std::string status(Mode mode, const std::map<char, Mode> &keys, const std::string &msg,
-                   const char *msg_col, const std::vector<std::string> &filters,
-                   const std::string &age_in, bool age_red, const std::string &pos, size_t width,
+                   const std::string &brief, const char *msg_col,
+                   const std::vector<std::string> &filters, const std::string &age_in,
+                   bool age_red, const std::string &pos, size_t width,
                    std::vector<std::pair<size_t, size_t>> &hits,
                    std::vector<std::pair<size_t, size_t>> &chips) {
-    std::string m = msg, age = age_in, hint = "? keys";
+    std::string m = msg, age = age_in;
     size_t tw = 0;
     std::string strip;
     auto build = [&](bool compact) {
@@ -203,18 +161,19 @@ std::string status(Mode mode, const std::map<char, Mode> &keys, const std::strin
         }
     };
     build(false);
-    // narrow terminal: shed the hint, then the tab names, then the message, then the age chip.
-    // the gripe outlives the tab names: staleness is never hidden
+    // narrow terminal: fall back to the short form of the message, then shed the tab names, then
+    // drop the message. the message shortens first so a long gripe does not cost the tab names.
+    // the age chip outlives all of it: staleness is never hidden
     size_t used;
-    for (bool compact = false;;) {
+    // each step runs at most once: clearing m must not fall back into re-setting it from brief
+    for (bool briefed = false, compact = false;;) {
         // +1 for the space before the gap, +1 for the pad that keeps the chip off the last column
-        used = tw + (m.empty() ? 0 : utf8_len(m) + 1) + (hint.empty() ? 0 : utf8_len(hint) + 1) +
-               1 + utf8_len(age) + 1 + utf8_len(pos) + 2 + 1;
+        used = tw + (m.empty() ? 0 : utf8_len(m) + 1) + 1 + utf8_len(age) + 1 + utf8_len(pos) + 3;
         if (used <= width) break;
-        if (!hint.empty()) hint.clear();
+        if (!briefed) briefed = true, m = brief.empty() ? m : brief;
         else if (!compact) build(compact = true);
         else if (!m.empty()) m.clear();
-        else if (!shorten_age(age)) break;
+        else break;
     }
     std::string gap(used < width ? width - used : 0, ' ');
     // every segment repaints the fill: c() resets at each segment end
@@ -222,363 +181,15 @@ std::string status(Mode mode, const std::map<char, Mode> &keys, const std::strin
     std::string sep = fill.empty() ? "" : ";" + fill;
     std::string msg_sgr = m.empty() ? "90" : msg_col;
     return fit(strip + c((msg_sgr + sep).c_str(), (m.empty() ? "" : " " + m) + " " + gap) +
-                   c(("90" + sep).c_str(), hint.empty() ? "" : hint + " ") +
                    c(((age_red ? "1;31" : "90") + sep).c_str(), age + " ") +
                    c(("1;" + std::string(accent()) + sep).c_str(), " " + pos + " ") +
                    c(("90" + sep).c_str(), " "),
                width);
 }
 
-// under this the panes stop making sense: say so instead of painting a sheared grid
-const int MIN_COLS = 24, MIN_ROWS = 8;
-
-std::string too_small(int rows, int cols) {
-    std::string t = (size_t)cols >= 16 ? "Window too small" : (size_t)cols >= 9 ? "too small" : "!";
-    std::string out = "\033[2J";
-    for (int r = 1; r < (rows + 1) / 2; r++) out += "\r\n";
-    return out + std::string(((size_t)cols - utf8_len(t)) / 2, ' ') +
-           c("1;33", plain_cut(t, std::min((size_t)cols, utf8_len(t)))) + "\033[J";
-}
-
-// marks: subject list, or one subject's marks. rows are 1:1 with lines, so sel is a line index
-struct MarksView {
-    std::vector<std::string> lines;
-    std::vector<std::string> subjects;  // list level only: line -> subject to open
-};
-
-MarksView build_marks(const view::Marks &snap, const std::string &subject, size_t cols) {
-    MarksView v;
-    if (!subject.empty()) {
-        view::Marks one;
-        for (const auto &r : snap.rows)
-            if (r.klass == subject) one.rows.push_back(r);
-        for (const auto &a : snap.averages)
-            if (std::get<0>(a) == subject) one.averages.push_back(a);
-        v.lines = paint::mark_lines(one, cols);
-        if (v.lines.empty()) v.lines.push_back(c("90", "no marks"));
-        return v;
-    }
-    std::vector<std::string> order;
-    std::map<std::string, std::pair<int, int>> tally;  // subject -> {marks, new}
-    for (const auto &r : snap.rows) {
-        if (!tally.count(r.klass)) order.push_back(r.klass);
-        tally[r.klass].first++;
-        tally[r.klass].second += r.is_new;
-    }
-    std::map<std::string, double> newest;  // averages run oldest period first, so the last wins
-    for (const auto &[k, p, a] : snap.averages) newest[k] = a;
-    size_t wc = 3;
-    for (const auto &k : order) wc = std::max(wc, utf8_len(k));
-    for (const auto &k : order) {
-        auto it = newest.find(k);
-        // a subject whose marks are none of them gradeable averages to N, not to a blank
-        std::string a = it == newest.end() ? "N" : paint::avg_str(it->second);
-        char n[32];
-        snprintf(n, sizeof n, "%d mark%s", tally[k].first, tally[k].first == 1 ? "" : "s");
-        v.lines.push_back(c((std::string("1;") + accent()).c_str(),
-                            k + std::string(wc - utf8_len(k), ' ')) +
-                          "  " +
-                          c(it == newest.end() ? "39" : paint::avg_color(it->second), a) + "  " +
-                          c("90", n) + (tally[k].second ? "  " + c(NEW_CHIP, " NEW ") : ""));
-        v.subjects.push_back(k);
-    }
-    if (order.empty()) v.lines.push_back(c("90", "no marks"));
-    return v;
-}
-
-std::string plain(const std::string &l);
-
-// a box over the frame; drawn with absolute cursor moves so nothing has to be spliced. body
-// lines may carry their own sgr, so they are padded by visible width and never re-coloured
-std::string popup(const std::string &name, const std::vector<std::string> &body, int rows,
-                  int cols, size_t minw = 0, size_t at_row = 0, size_t at_col = 0,
-                  size_t *row0 = nullptr, size_t *col0 = nullptr, size_t *wide = nullptr) {
-    size_t w = std::max(utf8_len(name), minw);
-    for (const auto &b : body) w = std::max(w, utf8_len(plain(b)));
-    if (w > (size_t)cols - 6) w = (size_t)cols - 6;
-    size_t h = body.size() + 4;
-    // an anchored box hangs off a screen cell, and is pulled back in when it would run off
-    size_t r0 = at_row ? at_row : (size_t)rows > h ? ((size_t)rows - h) / 2 + 1 : 1;
-    size_t c0 = at_col ? at_col : (size_t)cols > w + 4 ? ((size_t)cols - w - 4) / 2 + 1 : 1;
-    if (r0 + h > (size_t)rows + 1) r0 = (size_t)rows > h ? (size_t)rows - h + 1 : 1;
-    if (c0 + w + 4 > (size_t)cols + 1) c0 = (size_t)cols > w + 4 ? (size_t)cols - w - 3 : 1;
-    std::string ac = accent();
-    if (row0) *row0 = r0;
-    if (col0) *col0 = c0;
-    if (wide) *wide = w + 4;
-    auto at = [&](size_t r) { return "\033[" + std::to_string(r0 + r) + ";" +
-                                     std::to_string(c0) + "H"; };
-    auto pad = [&](const std::string &l) {
-        size_t n = utf8_len(plain(l));
-        return n <= w ? l + "\033[0m" + std::string(w - n, ' ') : plain_cut(plain(l), w);
-    };
-    std::string out = at(0) + c(ac.c_str(), "┌");
-    for (size_t i = 0; i < w + 2; i++) out += c(ac.c_str(), "─");
-    out += c(ac.c_str(), "┐");
-    out += at(1) + c(ac.c_str(), "│") + " " + c("1", plain_cut(name, w)) + " " +
-           c(ac.c_str(), "│");
-    for (size_t i = 0; i < body.size(); i++)
-        out += at(2 + i) + c(ac.c_str(), "│") + " " + pad(body[i]) + " " + c(ac.c_str(), "│");
-    out += at(2 + body.size()) + c(ac.c_str(), "│") + " " + std::string(w, ' ') + " " +
-           c(ac.c_str(), "│");
-    out += at(3 + body.size()) + c(ac.c_str(), "└");
-    for (size_t i = 0; i < w + 2; i++) out += c(ac.c_str(), "─");
-    out += c(ac.c_str(), "┘");
-    return out;
-}
-
-std::string lesson_popup(const Lesson &l, int rows, int cols) {
-    std::vector<std::string> body;
-    auto hhmm = [](const std::string &t) { return t.size() == 4 ? "0" + t : t; };
-    if (!l.begins.empty()) body.push_back(hhmm(l.begins) + " - " + hhmm(l.ends));
-    if (!l.room.empty()) body.push_back(l.room);
-    const std::string &who = l.teacher_name.empty() ? l.teacher : l.teacher_name;
-    if (!who.empty()) body.push_back(who);
-    // a changed lesson says what the change is; the grid keeps showing what it should have been
-    if (!l.state.empty()) {
-        std::string what = l.change;
-        if (what.empty()) what = l.state == "x" ? "cancelled" : "changed";
-        body.push_back("");
-        body.push_back(c(l.state == "x" ? "1;32" : "1;31", "*") + " " + what);
-    }
-    return popup(l.subject_name.empty() ? l.subject : l.subject_name, body, rows, cols, 34);
-}
-
-// the week menu: two weeks back, four ahead, then the permanent grid. `cur` is the week on
-// screen, `sel` the cursor
-std::vector<std::pair<std::string, std::string>> weeks(const std::string &cur) {
-    std::string base = view::wanted_monday();
-    std::vector<std::pair<std::string, std::string>> out;
-    for (int n = -2; n <= 4; n++) {
-        std::string m = view::ymd_plus(base, 7 * n);
-        out.push_back({m, paint::date_short(m)});
-    }
-    if (std::find_if(out.begin(), out.end(), [&](const auto &w) { return w.first == cur; }) ==
-        out.end() && cur != PERM_MONDAY)
-        out.insert(out.begin(), {cur, paint::date_short(cur)});  // stepped past the menu range
-    out.push_back({PERM_MONDAY, "permanent"});
-    return out;
-}
-
-// one menu row: label centred in a uniform block, this week in the accent, the cursor inverse
-std::string week_row(const std::string &label, size_t w, bool now, bool sel) {
-    size_t n = std::min(w, utf8_len(label)), lead = (w - n) / 2;
-    std::string t = std::string(lead, ' ') + plain_cut(label, w - lead);
-    std::string sgr = sel ? "7" : now ? "1;" + std::string(accent()) : "39";
-    return c(sgr.c_str(), t);
-}
-
-std::vector<std::string> help_body(const std::map<char, Mode> &keys) {
-    std::string modes;
-    for (int m = 0; m < M_N; m++)
-        for (const auto &[ch, md] : keys)
-            if (md == m) modes += std::string(1, ch) + " " + MODE_NAME[m] + "   ";
-    return {modes,
-            "tab / shift-tab  next / previous tab",
-            "j k arrows       move",
-            "g G home end     first / last",
-            "space ^d ^u      half screen down / up (not table)",
-            "pgup pgdn        screen up / down",
-            "/ esc            filter, clear the filters",
-            "enter            feed: open link   marks: open subject",
-            "X                feed: dismiss the item",
-            "h l left right   marks: back / open   table: hour",
-            "space enter      table: lesson detail",
-            "[ ] w            table: week back, forward, menu",
-            "mouse            click a tab, chip or week arrow,",
-            "                 double click to open, wheel scrolls",
-            "? a r q ^c       keys, sign in, refresh, quit, quit"};
-}
-
-// a painted line with its sgr escapes dropped, for locating chips by column
-std::string plain(const std::string &l) {
-    std::string o;
-    for (size_t i = 0; i < l.size(); i++) {
-        if (l[i] == 27) {
-            size_t e = l.find('m', i);
-            if (e == std::string::npos) break;
-            i = e;
-        } else o += l[i];
-    }
-    return o;
-}
-
-// "/ang info teams" -> three folded words, ANDed by view::feed_rows
-std::vector<std::string> filter_words(const std::string &line) {
-    std::vector<std::string> out;
-    for (size_t i = 0; i < line.size();) {
-        size_t e = line.find(' ', i);
-        if (e == std::string::npos) e = line.size();
-        if (e > i) out.push_back(view::fold(line.substr(i, e - i)));
-        i = e + 1;
-    }
-    return out;
-}
-
-// paint::term_cols() caps at 100 for pipes; the tui owns the whole screen so it uses the real size
-void term_size(int &rows, int &cols) {
-    struct winsize w {};
-    if (ioctl(1, TIOCGWINSZ, &w) != 0) w = {24, 80, 0, 0};
-    rows = w.ws_row ? w.ws_row : 24;
-    cols = w.ws_col ? w.ws_col : 80;
-}
-
-// keymap parsing, cell fitting and the grid geometry; run by --selfcheck
-int selfcheck() {
-    {  // date_short: czech day. month., year only when it is not the current one
-        time_t n = time(nullptr);
-        struct tm cur {};
-        localtime_r(&n, &cur);
-        char y[8];
-        strftime(y, sizeof y, "%Y", &cur);
-        if (paint::date_short(std::string(y) + "-08-17") != "17. 8." ||
-            paint::date_short("1999-01-05") != "5. 1. 1999") {
-            fprintf(stderr, "selfcheck failed: date_short\n");
-            return 1;
-        }
-    }
-    if (plain_cut("abcdef", 3) != "abc" || plain_cut("ab", 4) != "ab  " ||
-        plain_cut("čeština", 3) != "češ") {
-        fputs("selfcheck failed: plain_cut\n", stderr);
-        return 1;
-    }
-    config().set("key.x", "timetable");
-    config().set("key.z", "nonsense");
-    std::map<char, Mode> k = keymap();
-    if (k['f'] != M_FEED || k['m'] != M_MARKS || k['x'] != M_TABLE || k['b'] != M_ABSENCE ||
-        k.count('z')) {
-        fputs("selfcheck failed: keymap\n", stderr);
-        return 1;
-    }
-    size_t w = 0;
-    std::vector<std::pair<size_t, size_t>> hits;
-    tabs(M_MARKS, k, w, hits, false);
-    if (w != 6 + 7 + 7 + 9 || hits[0].first != 1 || hits[1].first != 7 ||
-        hits[2].second != 20 || hits[3].first != 21) {
-        fputs("selfcheck failed: tab hit columns\n", stderr);
-        return 1;
-    }
-    tabs(M_MARKS, k, w, hits, true);  // compact: one letter a tab
-    if (w != 4 * 3) {
-        fputs("selfcheck failed: compact tabs\n", stderr);
-        return 1;
-    }
-
-    view::Timetable tt;
-    tt.monday = "2026-08-17";
-    tt.days = {"2026-08-17", "2026-08-18"};
-    tt.hours = {"1", "2"};
-    tt.rows = {{"bakalari", "2026-08-17", "1", "CJL", "Cestina", "214", "Novak", "", "8:00", "8:45", "Jan Novak", ""}};
-    tt.grid = {&tt.rows[0], nullptr, nullptr, nullptr};
-    {  // widest time form that fits: full span, minutes-only, start over end, then nothing
-        paint::TableLayout wide = paint::table_layout(tt, 3, 200, 3);
-        paint::TableLayout m = paint::table_layout(tt, 3, 20, 3);
-        paint::TableLayout e = paint::table_layout(tt, 3, 14, 3);
-        paint::TableLayout n = paint::table_layout(tt, 3, 11, 3);
-        if (wide.t0[0] != "8:00-8:45" || wide.cw != 9 || m.t0[0] != "00-45" || m.time_rows != 1 ||
-            e.time_rows != 2 || e.t1[0] != "8:45" || n.time_rows) {
-            fputs("selfcheck failed: table time forms\n", stderr);
-            return 1;
-        }
-    }
-    {  // an hour with no lesson all week is dropped, and so is a day with none
-        view::Timetable e = tt;
-        e.hours = {"0", "1", "2"};
-        e.days = {"2026-08-17", "2026-08-18"};
-        e.grid = {nullptr, &e.rows[0], nullptr, nullptr, nullptr, nullptr};
-        view::compact(e);
-        if (e.hours != std::vector<std::string>{"1"} || e.days.size() != 1 || e.grid.size() != 1) {
-            fputs("selfcheck failed: table compact\n", stderr);
-            return 1;
-        }
-    }
-    {  // the lesson box states the change, not the hour or the date; the menu offers the grid
-        Lesson x = tt.rows[0];
-        x.state = "x";
-        x.change = "Odpadá";
-        std::string b = lesson_popup(x, 40, 100);  // raw: plain() cannot skip the cursor moves
-        if (b.find("08:00 - 08:45") == std::string::npos || b.find("Jan Novak") == std::string::npos ||
-            b.find("Odpadá") == std::string::npos || b.find("hour") != std::string::npos ||
-            weeks("2026-08-17").back().first != std::string(PERM_MONDAY)) {
-            fputs("selfcheck failed: lesson box\n", stderr);
-            return 1;
-        }
-    }
-    Geom big{}, small{};
-    std::vector<std::string> b = grid_lines(tt, 0, 0, 40, 200, big);
-    std::vector<std::string> s2 = grid_lines(tt, 0, 0, 5, 24, small);
-    // wide terminal: three lines a cell plus a spacer row; cramped: one line, no spacer
-    if (big.blk != 4 || small.blk != 2 || b.size() != big.top + 2 * 4 || s2.size() != small.top + 2 * 2) {
-        fputs("selfcheck failed: table tiers\n", stderr);
-        return 1;
-    }
-    // a grid smaller than the pane sits in the middle of it, not in the top left corner
-    if (!big.left || b[0] != "" || b[big.top - 1].compare(0, big.left, std::string(big.left, ' '))) {
-        fputs("selfcheck failed: table centring\n", stderr);
-        return 1;
-    }
-    {  // the week control lands on the header line, shifted along with the block
-        Geom flat{};
-        grid_lines(tt, 0, 0, 0, 200, flat);  // the cli path draws no arrows to click
-        std::string hdr = plain(b[big.hdr]);
-        if (flat.prev || big.prev != big.left + 1 || big.lbl0 != big.left + 3 ||
-            big.next != big.lbl1 + 2 || utf8_len(hdr) != big.next ||
-            hdr.compare(big.left, 3, "◂") != 0) {
-            fputs("selfcheck failed: week control columns\n", stderr);
-            return 1;
-        }
-    }
-    if (small.gut + tt.hours.size() * (small.cw + 1) + 1 > 24) {
-        fputs("selfcheck failed: table overflows the terminal\n", stderr);
-        return 1;
-    }
-    // this grid fits any width in the sweep: a cut row means the geometry overran the terminal
-    for (int cx = 20; cx <= 200; cx++) {
-        Geom g{};
-        for (const auto &line : grid_lines(tt, 0, 0, 24, cx, g))
-            if (fit(line, (size_t)cx) != line) {
-                fprintf(stderr, "selfcheck failed: table row overflows %d columns\n", cx);
-                return 1;
-            }
-    }
-    {  // chip columns come off the painted title line, sgr and all
-        std::string hdr = c("1", "title") + "  " + c("1;36", "<ANG>") + " " +
-                          c("33", "<hw>") + " " + c("90", "<teams>");
-        std::string p = plain(hdr);
-        if (p != "title  <ANG> <hw> <teams>" || p.rfind("<hw>") != 13) {
-            fputs("selfcheck failed: chip columns\n", stderr);
-            return 1;
-        }
-    }
-    {  // a bar narrower than its own chips must still return, not trim forever
-        std::vector<std::pair<size_t, size_t>> sh, sc;
-        std::string a = "data 12 min old";
-        if (!shorten_age(a) || a != "12 min old" || !shorten_age(a) || a != "12 min" ||
-            !shorten_age(a) || a != "12m" || shorten_age(a)) {
-            fputs("selfcheck failed: age ladder\n", stderr);
-            return 1;
-        }
-        for (size_t wd = 4; wd <= 40; wd++) {
-            std::string bar = status(M_FEED, {{'f', M_FEED}}, "hi", "90", {}, "data 12 min old",
-                                     false, "1/9", wd, sh, sc);
-            if (fit(bar, wd) != bar) {
-                fprintf(stderr, "selfcheck failed: status bar overflows %zu columns\n", wd);
-                return 1;
-            }
-        }
-    }
-    if (filter_words("  ANG   info teams ") != std::vector<std::string>{"ang", "info", "teams"} ||
-        !filter_words("   ").empty()) {
-        fputs("selfcheck failed: filter_words\n", stderr);
-        return 1;
-    }
-    fputs(TUI_NAME ": selfcheck ok\n", stdout);
-    return 0;
-}
-
-}  // namespace
-
-namespace {
+// a screen of its own, not a box over the frame: title, two colour-separated columns, and a
+// footer that blocks until a key. no state, no dismiss branch — it is a call, not a mode
+using Row = std::pair<std::string, std::string>;
 
 // one keystroke: a plain byte, a csi with a final byte, or an sgr mouse report
 struct Ev {
@@ -621,12 +232,195 @@ bool next_ev(std::string &b, Ev &e, bool esc_ok) {
     return true;
 }
 
+// a page opened by a double click gets that click's release next: mouse reports are not keys
+void wait_key() {
+    std::string b;
+    Ev e;
+    for (char buf[64];;) {
+        ssize_t n = read(0, buf, sizeof buf);
+        if (n <= 0) return;
+        b.append(buf, (size_t)n);
+        while (next_ev(b, e, true))
+            if (!e.mouse) return;
+    }
+}
+
+void show_page(const std::string &title, const std::vector<Row> &rows, int trows, int tcols) {
+    size_t kw = 0;
+    for (const auto &[k, v] : rows) kw = std::max(kw, utf8_len(k));
+    std::string out = "\033[H\033[2J  " + c(accent_bold(), title) + "\r\n\r\n";
+    int left = trows - 3;  // title, its blank line, and the footer
+    for (const auto &[k, v] : rows) {
+        if (left-- <= 0) break;
+        if (k.empty() && v.empty()) {
+            out += "\r\n";
+            continue;
+        }
+        out += fit("  " + c(accent(), plain_cut(k, kw)) + "  " + c("39", v), (size_t)tcols) +
+               "\r\n";
+    }
+    out += "\033[" + std::to_string(trows) + ";1H" + c("90", "  press any key to return…");
+    fwrite(out.data(), 1, out.size(), stdout);
+    fflush(stdout);
+    wait_key();
+}
+
+// a screen of its own like show_page, but a pick: `permanent` on top, then the weeks around
+// now, dimmed when nothing is stored for them (the grid falls back to permanent there). returns
+// the monday chosen, empty on esc
+std::string week_page(Store &store, const std::string &cur_mon, int trows, int tcols) {
+    std::string base = view::wanted_monday();
+    std::vector<std::string> mons{PERM_MONDAY}, labs{"permanent"};
+    std::vector<bool> stored{true};
+    for (int w = -6; w <= 10; w++) {
+        std::string m = view::ymd_plus(base, 7 * w), su = view::ymd_plus(m, 6);
+        mons.push_back(m);
+        labs.push_back(date_short(m) + " – " + date_short(su) + (m == base ? "  now" : ""));
+        stored.push_back(!store.lessons(m, su).empty());
+    }
+    size_t sel = 0, shown = std::min(mons.size(), (size_t)std::max(trows - 3, 0));
+    for (size_t i = 0; i < mons.size(); i++)
+        if (mons[i] == cur_mon) sel = i;
+    std::string b;
+    Ev e;
+    for (;;) {
+        std::string out = "\033[H\033[2J  " + c(accent_bold(), "week") + "\r\n\r\n";
+        for (size_t i = 0; i < shown; i++)
+            out += fit((i == sel ? std::string("\033[") + accent() + "m▎\033[0m " : "  ") +
+                           c(stored[i] ? "39" : "90", labs[i]),
+                       (size_t)tcols) +
+                   "\r\n";
+        out += "\033[" + std::to_string(trows) + ";1H" + c("90", "  enter picks, esc returns");
+        fwrite(out.data(), 1, out.size(), stdout);
+        fflush(stdout);
+        for (char buf[64]; !next_ev(b, e, true);) {
+            ssize_t n = read(0, buf, sizeof buf);
+            if (n <= 0) return "";
+            b.append(buf, (size_t)n);
+        }
+        if (e.ch == 27 || e.ch == 'q') return "";
+        if (e.ch == '\r' || e.ch == '\n' || e.ch == ' ') return mons[sel];
+        if (e.ch == 'j' || e.fin == 'B' || (e.mouse && e.btn == 65)) sel = std::min(sel + 1, shown - 1);
+        else if (e.ch == 'k' || e.fin == 'A' || (e.mouse && e.btn == 64)) sel = sel ? sel - 1 : 0;
+        else if (e.ch == 'g') sel = 0;
+        else if (e.ch == 'G') sel = shown - 1;
+        else if (e.mouse && e.btn == 0 && e.fin == 'M' && e.my >= 3 && (size_t)(e.my - 3) < shown)
+            return mons[(size_t)(e.my - 3)];
+    }
+}
+
+std::vector<Row> key_rows(const std::map<char, Mode> &keys) {
+    std::string modes;
+    for (int m = 0; m < M_N; m++)
+        for (const auto &[ch, md] : keys)
+            if (md == m)
+                modes += (modes.empty() ? "" : "  ") + std::string(1, ch) + " " + MODE_NAME[m];
+    return {{"tabs", modes},
+            {"tab shift-tab", "next / previous tab"},
+            {"", ""},
+            {"j k \u2193 \u2191", "next post, or next paragraph of one taller than the screen"},
+            {"space ^d ^u", "half a screen down / up"},
+            {"pgdn pgup", "a screen down / up"},
+            {"g G home end", "first / last"},
+            {"", ""},
+            {"feed", "J K next / previous post, enter opens the link, X dismisses"},
+            {"marks", "enter l \u2192 open the subject, h \u2190 esc back"},
+            {"timetable", "h j k l move, enter the lesson in full"},
+            {"", "[ ] week back / forward, p the permanent grid and back"},
+            {"", "w (or a click on the week) picks a week from a list"},
+            {"", ""},
+            {"/ esc", "filter, then clear the filters"},
+            {"? a r q", "these keys, sign in, fetch now, quit"}};
+}
+
+std::vector<Row> lesson_rows(const Lesson &l) {
+    std::vector<Row> r;
+    if (!l.begins.empty()) r.push_back({"time", hhmm(l.begins) + " – " + hhmm(l.ends)});
+    if (!l.hour.empty()) r.push_back({"hour", l.hour});
+    r.push_back({"date", date_short(l.date)});
+    if (!l.subject.empty()) r.push_back({"subject", l.subject});
+    if (!l.room.empty()) r.push_back({"room", l.room});
+    const std::string &who = l.teacher_name.empty() ? l.teacher : l.teacher_name;
+    if (!who.empty()) r.push_back({"teacher", who});
+    // a changed lesson says what the change is; the grid keeps showing what it should have been
+    if (!l.state.empty()) {
+        std::string what = l.change;
+        if (what.empty()) what = l.state == "x" ? "cancelled" : "changed";
+        r.push_back({"", ""});
+        r.push_back({l.state == "x" ? "cancelled" : "changed", what});
+    }
+    return r;
+}
+
+// the interactive sign-ins want a real terminal, so this one drops out of the alt screen
+void auth_page(const std::vector<std::string> &want) {
+    leave();
+    fputs("\033[H\033[2J", stdout);
+    printf("%s\n\n", c(accent_bold(), "sign in").c_str());
+    bool any = false;
+    for (const Source &src : sources()) {
+        if (std::find(want.begin(), want.end(), src.name) == want.end()) continue;
+        any = true;
+        try {
+            src.login();
+        } catch (const std::exception &e) {
+            fprintf(stderr, "%s\n", c("1;31", e.what()).c_str());
+        }
+        putchar('\n');
+    }
+    if (!any) printf("%s\n\n", c("90", "every source is already signed in").c_str());
+    printf("%s", c("90", "press enter to return…").c_str());
+    fflush(stdout);
+    char b[16];
+    if (!fgets(b, sizeof b, stdin)) {}
+    enter();
+}
+
+// `lo`..`hi` is the cursor's line span. the feed puts its stop on the top line, so it must be
+// allowed to scroll past the end or the last posts (or any post at all, when the feed fits the
+// screen) are unreachable
+void pane(std::string &out, const std::vector<std::string> &lines, size_t &top, size_t lo,
+          size_t hi, bool gutter, bool overscroll, int rows, int cols) {
+    size_t max_top = lines.size() > (size_t)rows ? lines.size() - (size_t)rows : 0;
+    if (overscroll) max_top = lines.empty() ? 0 : lines.size() - 1;
+    if (top > max_top) top = max_top;
+    for (int r = 0; r < rows; r++) {
+        size_t li = top + (size_t)r;
+        if (li < lines.size()) {
+            if (gutter)
+                out += li >= lo && li < hi ? std::string("\033[") + accent() + "m▎\033[0m " : "  ";
+            out += fit(lines[li], (size_t)cols - (gutter ? 2 : 0));
+        }
+        out += "\033[K";
+        if (r < rows - 1) out += "\r\n";
+    }
+    out += "\033[J\r\n";
+}
+
+// j/k/space/^d/^u/pgup/pgdn/wheel, identical in every pane. g/G and enter stay with the caller
+bool scroll_key(const Ev &e, long half, long page, const std::function<void(long)> &move) {
+    if (e.ch == 'j' || e.fin == 'B') move(1);
+    else if (e.ch == 'k' || e.fin == 'A') move(-1);
+    else if (e.ch == ' ' || e.ch == 4) move(half);
+    else if (e.ch == 21) move(-half);
+    else if (e.fin == '~' && e.seq == "5") move(-page);
+    else if (e.fin == '~' && e.seq == "6") move(page);
+    else if (e.mouse && e.btn == 64) move(-1);
+    else if (e.mouse && e.btn == 65) move(1);
+    else return false;
+    return true;
+}
+
+size_t step(size_t cur, long d, size_t hi) {
+    long v = (long)cur + d;
+    return (size_t)(v < 0 ? 0 : v > (long)hi ? (long)hi : v);
+}
+
 }  // namespace
 
-int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "--selfcheck")) return selfcheck();
+int main(int argc, char **) {
     if (argc > 1) {
-        fprintf(stderr, "usage: %s [--selfcheck]\n", TUI_NAME);
+        fprintf(stderr, "usage: %s\n", TUI_NAME);
         return 2;
     }
     if (!isatty(0) || !isatty(1)) {
@@ -653,14 +447,18 @@ int main(int argc, char **argv) {
         std::vector<size_t> owner;  // flat line -> post index
         std::vector<size_t> start;  // post index -> first flat line
         std::vector<std::string> flat;
-        size_t sel = 0, top = 0, click_post = (size_t)-1;
+        // where j/k land: a post that fits the screen is one stop (and paints centred); a longer
+        // one stops at each paragraph, and every `rows` lines inside a paragraph taller than that
+        std::vector<size_t> stops;
+        size_t cur = 0, top = 0;  // flat line of the current stop; line last painted at row 0
 
         view::Marks msnap;
         bool msnap_ok = false, marks_seen = false;
         std::string subject;
-        MarksView mv;
+        std::vector<std::string> mlines, msubjects;
         size_t msel = 0, mtop = 0;
 
+        view::Absences absnap;
         std::vector<std::string> alines;
         bool abs_ok = false;
         size_t atop = 0;
@@ -668,10 +466,7 @@ int main(int argc, char **argv) {
         view::Timetable tt;
         bool tt_ok = false, tt_first = true;
         std::string tt_mon;  // empty = the week view::timetable picks on its own
-        bool menu = false;
-        size_t wsel = 0, menu_row = 0, menu_col = 0, menu_w = 0;
         size_t cd = 0, chr = 0;
-        bool pop = false, help_pop = false;
         Geom geom;
         std::vector<std::string> tlines;
 
@@ -713,15 +508,30 @@ int main(int argc, char **argv) {
                     flat.clear();
                     owner.clear();
                     start.clear();
+                    stops.clear();
                     for (size_t p = 0; p < posts.size(); p++) {
                         start.push_back(flat.size());
-                        for (const auto &l : posts[p].lines) {
-                            flat.push_back(fit(l, (size_t)cols - 2));
+                        const auto &pl = posts[p].lines;
+                        bool fits = pl.size() <= (size_t)rows;
+                        size_t last = flat.size();
+                        for (size_t i = 0; i < pl.size(); i++) {
+                            bool para = i == 0 || (i + 1 < pl.size() && pl[i - 1].empty());
+                            if (i == 0 || (!fits && i + 1 < pl.size() &&
+                                           (para || flat.size() - last >= (size_t)rows))) {
+                                stops.push_back(flat.size());
+                                last = flat.size();
+                            }
+                            flat.push_back(fit(pl[i], (size_t)cols - 2));
                             owner.push_back(p);
                         }
                     }
-                    if (first || sel >= posts.size()) sel = posts.empty() ? 0 : posts.size() - 1;
-                    first = false;
+                    // the feed ends with the most urgent items, so it opens at the bottom
+                    if (first) {
+                        first = false;
+                        cur = stops.empty() ? 0 : stops.back();
+                    }
+                    auto s = std::upper_bound(stops.begin(), stops.end(), cur);
+                    cur = s == stops.begin() ? 0 : *(s - 1);
                 } else if (mode == M_MARKS) {
                     if (!msnap_ok) {
                         // never consumed here: a live reload would wipe the chips off rows the
@@ -730,11 +540,23 @@ int main(int argc, char **argv) {
                         msnap_ok = true;
                         marks_seen = true;
                     }
-                    mv = build_marks(msnap, subject, (size_t)cols - 2);
-                    if (msel >= mv.lines.size()) msel = mv.lines.empty() ? 0 : mv.lines.size() - 1;
+                    msubjects.clear();
+                    if (subject.empty()) {
+                        mlines = mark_subject_lines(msnap, msubjects);
+                    } else {
+                        view::Marks one;
+                        for (const auto &r : msnap.rows)
+                            if (r.klass == subject) one.rows.push_back(r);
+                        for (const auto &a : msnap.averages)
+                            if (std::get<0>(a) == subject) one.averages.push_back(a);
+                        mlines = mark_lines(one, (size_t)cols - 2);
+                    }
+                    if (mlines.empty()) mlines.push_back(c("90", "no marks"));
+                    if (msel >= msubjects.size()) msel = msubjects.empty() ? 0 : msubjects.size() - 1;
                 } else if (mode == M_ABSENCE) {
                     if (!abs_ok) {
-                        alines = paint::absence_lines(view::absence_rows(store, filters));
+                        absnap = view::absence_rows(store, filters);
+                        alines = absence_lines(absnap);
                         abs_ok = true;
                     }
                 } else {
@@ -763,131 +585,80 @@ int main(int argc, char **argv) {
                 msg_at = 0;
             }
 
+            size_t sel = flat.empty() || cur >= owner.size() ? 0 : owner[cur];
             std::string out = "\033[H", pos;
-            bool tiny = cols < MIN_COLS || rows + 1 < MIN_ROWS;
-            if (tiny) {
-                out += too_small(rows + 1, cols);
-            } else if (mode == M_FEED) {
+            if (mode == M_FEED) {
                 pos = std::to_string(posts.empty() ? 0 : sel + 1) + "/" +
                       std::to_string(posts.size());
-                if (flat.empty()) {
+                if (flat.empty())
                     out += "\033[90mnothing to show\033[0m\033[K\033[J\033[" +
                            std::to_string(rows + 1) + ";1H";
-                } else {
-                    // keep the selected post visible: its top, or its tail if it is taller than
-                    // the screen
-                    size_t s0 = start[sel], s1 = s0 + posts[sel].lines.size();
-                    if (s0 < top) top = s0;
-                    else if (s1 > top + (size_t)rows)
-                        top = s1 - (size_t)rows < s0 ? s1 - (size_t)rows : s0;
-                    size_t max_top = flat.size() > (size_t)rows ? flat.size() - (size_t)rows : 0;
-                    if (top > max_top) top = max_top;
-                    for (int r = 0; r < rows; r++) {
-                        size_t li = top + (size_t)r;
-                        if (li < flat.size())
-                            out += (owner[li] == sel
-                                        ? (std::string("\033[") + accent() + "m▎\033[0m ")
-                                        : "  ") +
-                                   flat[li];
-                        out += "\033[K";
-                        if (r < rows - 1) out += "\r\n";
+                else {
+                    size_t len = posts[sel].lines.size();
+                    top = cur;
+                    if (len <= (size_t)rows) {  // fits: centre the whole post
+                        size_t pad = ((size_t)rows - len) / 2;
+                        top = start[sel] > pad ? start[sel] - pad : 0;
                     }
-                    out += "\033[J\r\n";
+                    pane(out, flat, top, start[sel], start[sel] + len, true, true, rows, cols);
                 }
             } else if (mode == M_MARKS) {
-                pos = subject.empty() ? std::to_string(mv.subjects.size()) + " subjects" : subject;
-                bool list = subject.empty() && !mv.subjects.empty();
+                bool list = subject.empty() && !msubjects.empty();
+                pos = subject.empty() ? std::to_string(msubjects.size()) + " subjects" : subject;
                 if (list) {
                     if (msel < mtop) mtop = msel;
                     if (msel >= mtop + (size_t)rows) mtop = msel - (size_t)rows + 1;
                 }
-                size_t max_top = mv.lines.size() > (size_t)rows ? mv.lines.size() - (size_t)rows : 0;
-                if (mtop > max_top) mtop = max_top;
-                for (int r = 0; r < rows; r++) {
-                    size_t li = mtop + (size_t)r;
-                    if (li < mv.lines.size())
-                        out += (list ? (li == msel ? std::string("\033[") + accent() + "m▎\033[0m "
-                                                   : "  ")
-                                     : "  ") +
-                               fit(mv.lines[li], (size_t)cols - 2);
-                    out += "\033[K";
-                    if (r < rows - 1) out += "\r\n";
-                }
-                out += "\033[J\r\n";
+                pane(out, mlines, mtop, list ? msel : 0, list ? msel + 1 : 0, true, false, rows,
+                     cols);
             } else if (mode == M_ABSENCE) {
-                pos = std::to_string(alines.size()) + " subjects";
-                size_t max_top = alines.size() > (size_t)rows ? alines.size() - (size_t)rows : 0;
-                if (atop > max_top) atop = max_top;
-                for (int r = 0; r < rows; r++) {
-                    size_t li = atop + (size_t)r;
-                    if (li < alines.size()) out += "  " + fit(alines[li], (size_t)cols - 2);
-                    else if (!li) out += c("90", "no absence");
-                    out += "\033[K";
-                    if (r < rows - 1) out += "\r\n";
-                }
-                out += "\033[J\r\n";
+                pos = std::to_string(absnap.rows.size()) + " subjects";
+                pane(out, alines, atop, 0, 0, true, false, rows, cols);
             } else {
                 tlines = grid_lines(tt, cd, chr, rows, cols, geom);
-                pos = paint::date_short(tt.days.empty() ? tt.monday : tt.days[cd]);
-                for (int r = 0; r < rows; r++) {
-                    if ((size_t)r < tlines.size()) out += tlines[(size_t)r];
-                    out += "\033[K";
-                    if (r < rows - 1) out += "\r\n";
-                }
-                out += "\033[J\r\n";
+                pos = tt.monday == PERM_MONDAY
+                          ? "permanent"
+                          : date_short(tt.days.empty() ? tt.monday : tt.days[cd]);
+                size_t zero = 0;
+                pane(out, tlines, zero, 0, 0, false, false, rows, cols);
             }
-            if (!tiny) {
+
             bool age_red = false;
-            std::string age = age_chip(store, age_red, fetched_best);
+            view::Health health = view::health(store);
+            std::string age = age_chip(health, age_red, fetched_best);
             if (refresh_since) {  // give up on the spinner if no fetch lands
                 if (fetched_best > refresh_base || now_ms() - refresh_since > 120000) {
                     refresh_since = 0;
                     msg = fetched_best > refresh_base ? "refreshed" : "refresh timed out";
                     msg_at = now_ms();
                 } else {
-                    msg = "refreshing" + std::string(1 + (size_t)((now_ms() - refresh_since) / 400) % 3, '.');
+                    msg = "refreshing" +
+                          std::string(1 + (size_t)((now_ms() - refresh_since) / 400) % 3, '.');
                     msg_at = 0;
                 }
             }
             // a gripe is a condition, not a toast: it holds until it clears, but any transient
             // message wins the line while it lives
-            std::string line = msg;
+            std::string line = msg, brief = msg;
             const char *msg_col = "90";
             if (line.empty() && !fsnap.bad_filter.empty()) {
-                line = "no such filter '" + fsnap.bad_filter + "'";
+                line = brief = "no such filter '" + fsnap.bad_filter + "'";
                 msg_col = "1;31";
             }
             if (line.empty())
-                for (const view::Gripe &g : view::gripes(store)) {
+                for (const view::Gripe &g : health.gripes) {
                     line = g.text;
+                    brief = g.brief;
                     msg_col = g.error ? "1;31" : "1;33";
                     if (g.error) break;
                 }
             if (fmode)
-                out += c((std::string("1;") + accent()).c_str(), "/") + fbuf + "\033[7m \033[0m\033[K";
+                out += c(accent_bold(), "/") + fbuf + "\033[7m \033[0m\033[K";
             else
                 // the grid is unfiltered, so no chips there: view::timetable never sees filters
-                out += status(mode, keys, line, msg_col,
+                out += status(mode, keys, line, brief, msg_col,
                               mode == M_TABLE ? std::vector<std::string>{} : filters, age, age_red,
                               pos, (size_t)cols, tab_hits, chip_hits);
-            if (mode == M_TABLE && pop && !tt.grid.empty() && tt.at(cd, chr))
-                out += lesson_popup(*tt.at(cd, chr), rows, cols);
-            if (mode == M_TABLE && menu) {
-                std::vector<std::string> body;
-                auto ws = weeks(tt.monday);
-                if (wsel >= ws.size()) wsel = 0;
-                std::string now = view::wanted_monday();
-                size_t w = 0;
-                for (const auto &x : ws) w = std::max(w, utf8_len(x.second));
-                w += 4;
-                for (size_t i = 0; i < ws.size(); i++)
-                    body.push_back(week_row(ws[i].second, w, ws[i].first == now, i == wsel));
-                // the menu hangs under the week label it belongs to, never over the header
-                out += popup("week", body, rows, cols, w, geom.hdr + 2,
-                             geom.lbl0 > 2 ? geom.lbl0 - 2 : 1, &menu_row, &menu_col, &menu_w);
-            }
-            if (help_pop) out += popup("keys", help_body(keys), rows, cols);
-            }
             fwrite(out.data(), 1, out.size(), stdout);
             fflush(stdout);
 
@@ -904,7 +675,9 @@ int main(int argc, char **argv) {
                     for (ssize_t n; (n = read(ifd, eb, sizeof eb)) > 0;)
                         for (char *q = eb; q < eb + n;) {
                             auto *ev = (inotify_event *)q;
-                            if (ev->len && strncmp(ev->name, APP_NAME ".db", sizeof(APP_NAME ".db") - 1) == 0) wrote = true;
+                            if (ev->len &&
+                                strncmp(ev->name, APP_NAME ".db", sizeof(APP_NAME ".db") - 1) == 0)
+                                wrote = true;
                             q += sizeof(inotify_event) + ev->len;
                         }
                 }
@@ -940,12 +713,11 @@ int main(int argc, char **argv) {
                 auto set_week = [&](const std::string &m) {
                     tt_mon = m;
                     tt_ok = false;
-                    pop = menu = false;
                     cd = chr = 0;
                     relayout = true;
                 };
                 // stepping off the permanent grid lands on the real weeks, not on 1970
-                auto step = [&](int d) {
+                auto week_step = [&](int d) {
                     return view::ymd_plus(
                         tt.monday == PERM_MONDAY ? view::wanted_monday() : tt.monday, d);
                 };
@@ -954,11 +726,22 @@ int main(int argc, char **argv) {
                     msnap_ok = abs_ok = false;
                     relayout = true;
                 };
+                auto after_page = [&] {
+                    resized = 1;  // the page owned the screen: repaint all of it
+                    pending.clear();
+                };
                 if (fmode) {
                     if (e.ch == 27) fmode = false;
                     else if (e.ch == '\r' || e.ch == '\n') {
                         fmode = false;
-                        filters = filter_words(fbuf);
+                        std::vector<std::string> words;
+                        for (size_t i = 0; i < fbuf.size();) {
+                            size_t sp = fbuf.find(' ', i);
+                            if (sp == std::string::npos) sp = fbuf.size();
+                            if (sp > i) words.push_back(fbuf.substr(i, sp - i));
+                            i = sp + 1;
+                        }
+                        filters = view::fold_all(words);
                         refilter();
                     } else if (e.ch == 127 || e.ch == 8) {
                         while (!fbuf.empty() && ((unsigned char)fbuf.back() & 0xc0) == 0x80)
@@ -974,35 +757,9 @@ int main(int argc, char **argv) {
                 auto go = [&](Mode m) {
                     if (m == mode) return;
                     mode = m;
-                    pop = false;
                     relayout = true;
                 };
-                if (e.ch == 3) {
-                    quit = true;
-                    break;
-                }
-                if (menu) {  // the week menu owns every key while it is open
-                    auto ws = weeks(tt.monday);
-                    long hit = e.mouse && e.btn == 0 && e.fin == 'M'
-                                   ? e.my - (long)menu_row - 2
-                                   : -1;
-                    bool inside = hit >= 0 && (size_t)hit < ws.size() &&
-                                  (size_t)e.mx >= menu_col && (size_t)e.mx < menu_col + menu_w;
-                    if (e.ch == 'j' || e.fin == 'B') wsel += wsel + 1 < ws.size();
-                    else if (e.ch == 'k' || e.fin == 'A') wsel -= wsel > 0;
-                    else if (e.ch == '\r' || e.ch == '\n' || e.ch == ' ') set_week(ws[wsel].first);
-                    else if (inside) set_week(ws[(size_t)hit].first);
-                    else if (!e.mouse || e.fin == 'M') menu = false;  // outside click, or any key
-                    continue;
-                }
-                if (pop || help_pop) {  // any key dismisses a popup, and does nothing else
-                    // not the release of the double-click that opened it
-                    if (e.mouse && e.fin != 'M') continue;
-                    pop = help_pop = false;
-                    pending.clear();
-                    break;
-                }
-                if (e.ch == 'q') {
+                if (e.ch == 3 || e.ch == 'q') {
                     quit = true;
                     break;
                 }
@@ -1018,27 +775,27 @@ int main(int argc, char **argv) {
                     continue;
                 }
                 if (e.ch == '?') {
-                    help_pop = true;
-                    continue;
+                    show_page("keys", key_rows(keys), rows + 1, cols);
+                    after_page();
+                    break;
                 }
                 if (e.ch && keys.count(e.ch)) {
                     go(keys[e.ch]);
                     continue;
                 }
                 if (e.ch == 'a') {
-                    auth_all();
-                    resized = 1;
-                    relayout = true;
-                    continue;
+                    auth_page(health.unsigned_names);
+                    after_page();
+                    break;
                 }
                 if (e.ch == 'r') {
-                    msg = refresh();
-                    msg_at = now_ms();
-                    if (msg == "refresh failed") continue;  // leave it as a plain message
+                    if (!refresh()) {
+                        msg = "no " APP_NAME "d on PATH";
+                        msg_at = now_ms();
+                        continue;
+                    }
                     refresh_since = now_ms();
                     refresh_base = fetched_best;
-                    msg.clear();
-                    msg_at = 0;
                     relayout = true;
                     continue;
                 }
@@ -1050,8 +807,18 @@ int main(int argc, char **argv) {
                     go((Mode)((mode + M_N - 1) % M_N));
                     continue;
                 }
-                // a click on the tab strip switches mode wherever you are
+                auto pick_week = [&] {
+                    std::string m = week_page(store, tt.monday, rows + 1, cols);
+                    if (!m.empty()) set_week(m);
+                    after_page();
+                };
+                // a click on the tab strip switches mode wherever you are; on the week label, a
+                // week picker
                 if (e.mouse && e.btn == 0 && e.fin == 'M' && e.my == rows + 1) {
+                    if (mode == M_TABLE && (size_t)e.mx + utf8_len(pos) + 2 >= (size_t)cols) {
+                        pick_week();
+                        break;
+                    }
                     for (size_t i = 0; i < chip_hits.size(); i++)
                         if ((size_t)e.mx >= chip_hits[i].first &&
                             (size_t)e.mx <= chip_hits[i].second) {
@@ -1067,6 +834,21 @@ int main(int argc, char **argv) {
 
                 long half = rows > 1 ? rows / 2 : 1, page = rows > 1 ? rows : 1;
                 if (mode == M_FEED) {
+                    // d lines forward (back), then on to the next (previous) stop
+                    auto move = [&](long d) {
+                        if (stops.empty()) return;
+                        long want = (long)cur + d;
+                        if (d > 0) {
+                            auto s = std::lower_bound(stops.begin(), stops.end(), (size_t)want);
+                            while (s != stops.end() && *s <= cur) ++s;
+                            cur = s == stops.end() ? stops.back() : *s;
+                        } else {
+                            auto s = std::upper_bound(stops.begin(), stops.end(),
+                                                      (size_t)(want < 0 ? 0 : want));
+                            while (s != stops.begin() && *(s - 1) >= cur) --s;
+                            cur = s == stops.begin() ? stops.front() : *(s - 1);
+                        }
+                    };
                     auto open_sel = [&] {
                         if (posts.empty()) return;
                         msg = posts[sel].url.empty()          ? "no link"
@@ -1074,143 +856,91 @@ int main(int argc, char **argv) {
                                                               : "open failed";
                         msg_at = now_ms();
                     };
-                    auto move = [&](long d) {
-                        if (posts.empty()) return;
-                        long v = (long)sel + d;
-                        sel = (size_t)(v < 0                     ? 0
-                                       : v >= (long)posts.size() ? (long)posts.size() - 1
-                                                                 : v);
-                    };
                     if (e.ch == '\r' || e.ch == '\n') open_sel();
                     else if (e.ch == 'X' && !posts.empty()) {
                         store.dismiss({fsnap.items[fsnap.rows[sel].n - 1].id});
                         msg = "dismissed";
                         msg_at = now_ms();
-                        msnap_ok = false;
                         relayout = true;
                     }
-                    else if (e.ch == 'j' || e.fin == 'B') move(1);
-                    else if (e.ch == 'k' || e.fin == 'A') move(-1);
-                    else if (e.ch == 'g' || e.fin == 'H') sel = 0;
-                    else if (e.ch == 'G' || e.fin == 'F') move((long)posts.size());
-                    else if (e.ch == ' ' || e.ch == 4) move(half);
-                    else if (e.ch == 21) move(-half);
-                    else if (e.fin == '~' && e.seq == "5") move(-page);
-                    else if (e.fin == '~' && e.seq == "6") move(page);
-                    else if (e.mouse && e.btn == 64) move(-1);
-                    else if (e.mouse && e.btn == 65) move(1);
+                    // whole posts, for a feed of long mails that would take a page of j each
+                    else if (e.ch == 'J' && sel + 1 < posts.size()) cur = start[sel + 1];
+                    else if (e.ch == 'K') cur = sel ? start[sel - 1] : 0;
+                    else if (e.ch == 'g' || e.fin == 'H') cur = 0;
+                    else if (e.ch == 'G' || e.fin == 'F') cur = stops.empty() ? 0 : stops.back();
+                    else if (scroll_key(e, half, page, move)) {}
                     else if (e.mouse && e.btn == 0 && e.fin == 'M') {
                         size_t li = top + (size_t)(e.my - 1);
                         if (li >= flat.size()) continue;
-                        sel = owner[li];
                         // feed_posts puts every url on a line of its own: click it, open it
-                        std::string u = trim(plain(flat[li]));
+                        std::string u = trim(strip_sgr(flat[li]));
                         if (u.compare(0, 4, "http") == 0 && u.find(' ') == std::string::npos) {
                             msg = open_url(u) == 0 ? "opened in browser" : "open failed";
                             msg_at = now_ms();
                             continue;
                         }
-                        // the title line carries the <class> chip: click it to filter by class
-                        size_t hdr = start[sel] + (sel && fsnap.rows[sel].bucket ==
-                                                              fsnap.rows[sel - 1].bucket ? 0 : 1);
-                        if (li == hdr) {
-                            const Item &it = fsnap.items[fsnap.rows[sel].n - 1];
-                            std::string p = plain(flat[li]);
-                            size_t col = (size_t)e.mx - 3;  // mx is 1-based, past the 2-col gutter
-                            std::string k = view::fold(fsnap.rows[sel].klass);
-                            for (const std::string &chip : {fsnap.rows[sel].klass, it.kind,
-                                                            it.source}) {
-                                size_t at = p.rfind("<" + chip + ">");
-                                if (at == std::string::npos) continue;
-                                size_t c0 = utf8_len(p.substr(0, at));
-                                if (col >= c0 && col < c0 + utf8_len(chip) + 2) k = view::fold(chip);
-                            }
-                            if (std::find(filters.begin(), filters.end(), k) == filters.end()) {
-                                filters.push_back(k);
-                                refilter();
-                            }
-                            continue;
-                        }
+                        cur = start[owner[li]];
                         long long t = now_ms();
-                        if (click_post == sel && t - click_at < 400) {
+                        if (click_at && t - click_at < 400) {
                             open_sel();
                             click_at = 0;
-                        } else {
-                            click_at = t;
-                            click_post = sel;
-                        }
+                        } else click_at = t;
                     }
                 } else if (mode == M_MARKS) {
-                    bool list = subject.empty() && !mv.subjects.empty();
+                    bool list = subject.empty() && !msubjects.empty();
                     auto move = [&](long d) {
-                        if (list) {
-                            long v = (long)msel + d, hi = (long)mv.subjects.size() - 1;
-                            msel = (size_t)(v < 0 ? 0 : v > hi ? hi : v);
-                        } else {
-                            long v = (long)mtop + d;
-                            mtop = (size_t)(v < 0 ? 0 : v);
-                        }
+                        if (list) msel = step(msel, d, msubjects.size() - 1);
+                        else mtop = step(mtop, d, mlines.size());
                     };
-                    auto back = [&] {
-                        if (subject.empty()) return;
+                    if ((e.ch == '\r' || e.ch == '\n' || e.ch == 'l' || e.fin == 'C') && list) {
+                        subject = msubjects[msel];
+                        mtop = 0;
+                        relayout = true;
+                    } else if (e.ch == 27 || e.ch == 'h' || e.fin == 'D') {
+                        if (subject.empty()) continue;
                         subject.clear();
                         mtop = 0;
                         relayout = true;
-                    };
-                    if ((e.ch == '\r' || e.ch == '\n' || e.ch == 'l' || e.fin == 'C') && list) {
-                        subject = mv.subjects[msel];
-                        mtop = 0;
-                        relayout = true;
-                    } else if (e.ch == 27 || e.ch == 'h' || e.fin == 'D') back();
-                    else if (e.ch == 'j' || e.fin == 'B') move(1);
-                    else if (e.ch == 'k' || e.fin == 'A') move(-1);
-                    else if (e.ch == 'g' || e.fin == 'H') (list ? msel : mtop) = 0;
+                    } else if (e.ch == 'g' || e.fin == 'H') (list ? msel : mtop) = 0;
                     else if (e.ch == 'G' || e.fin == 'F') move(1 << 20);
-                    else if (e.ch == ' ' || e.ch == 4) move(half);
-                    else if (e.ch == 21) move(-half);
-                    else if (e.fin == '~' && e.seq == "5") move(-page);
-                    else if (e.fin == '~' && e.seq == "6") move(page);
-                    else if (e.mouse && e.btn == 64) move(-1);
-                    else if (e.mouse && e.btn == 65) move(1);
+                    else if (scroll_key(e, half, page, move)) {}
                     else if (e.mouse && e.btn == 0 && e.fin == 'M' && list) {
                         size_t li = mtop + (size_t)(e.my - 1);
-                        if (li >= mv.subjects.size()) continue;
+                        if (li >= msubjects.size()) continue;
                         long long t = now_ms();
                         bool again = msel == li && t - click_at < 400;
                         msel = li;
                         click_at = again ? 0 : t;
                         if (again) {
-                            subject = mv.subjects[msel];
+                            subject = msubjects[msel];
                             mtop = 0;
                             relayout = true;
                         }
                     }
                 } else if (mode == M_ABSENCE) {
-                    auto move = [&](long d) {
-                        long v = (long)atop + d;
-                        atop = (size_t)(v < 0 ? 0 : v);
-                    };
-                    if (e.ch == 'j' || e.fin == 'B') move(1);
-                    else if (e.ch == 'k' || e.fin == 'A') move(-1);
-                    else if (e.ch == 'g' || e.fin == 'H') atop = 0;
+                    auto move = [&](long d) { atop = step(atop, d, alines.size()); };
+                    if (e.ch == 'g' || e.fin == 'H') atop = 0;
                     else if (e.ch == 'G' || e.fin == 'F') move(1 << 20);
-                    else if (e.ch == ' ' || e.ch == 4) move(half);
-                    else if (e.ch == 21) move(-half);
-                    else if (e.fin == '~' && e.seq == "5") move(-page);
-                    else if (e.fin == '~' && e.seq == "6") move(page);
-                    else if (e.mouse && e.btn == 64) move(-1);
-                    else if (e.mouse && e.btn == 65) move(1);
+                    else scroll_key(e, half, page, move);
                 } else {
                     size_t nd = tt.days.size(), nh = tt.hours.size();
                     auto mvd = [&](long dd, long dh) {
                         if (!nd || !nh) return;
-                        long v = (long)cd + dd;
-                        cd = (size_t)(v < 0 ? 0 : v >= (long)nd ? (long)nd - 1 : v);
-                        long w = (long)chr + dh;
-                        chr = (size_t)(w < 0 ? 0 : w >= (long)nh ? (long)nh - 1 : w);
+                        cd = step(cd, dd, nd - 1);
+                        chr = step(chr, dh, nh - 1);
                     };
-                    if (e.ch == '\r' || e.ch == '\n' || e.ch == ' ')
-                        pop = nd && nh && tt.at(cd, chr);
+                    auto detail = [&] {
+                        if (nd && nh && tt.at(cd, chr)) {
+                            const Lesson &l = *tt.at(cd, chr);
+                            show_page(l.subject_name.empty() ? l.subject : l.subject_name,
+                                      lesson_rows(l), rows + 1, cols);
+                            after_page();
+                        }
+                    };
+                    if (e.ch == '\r' || e.ch == '\n' || e.ch == ' ') {
+                        detail();
+                        break;
+                    }
                     else if (e.ch == 'j' || e.fin == 'B') mvd(1, 0);
                     else if (e.ch == 'k' || e.fin == 'A') mvd(-1, 0);
                     else if (e.ch == 'l' || e.fin == 'C') mvd(0, 1);
@@ -1221,30 +951,25 @@ int main(int argc, char **argv) {
                         mvd(-(geom.blk ? std::max<long>(1, rows / (long)geom.blk) : 1), 0);
                     else if (e.fin == '~' && e.seq == "6")
                         mvd(geom.blk ? std::max<long>(1, rows / (long)geom.blk) : 1, 0);
-                    else if (e.ch == '[') set_week(step(-7));
-                    else if (e.ch == ']') set_week(step(7));
+                    else if (e.ch == '[') set_week(week_step(-7));
+                    else if (e.ch == ']') set_week(week_step(7));
+                    else if (e.ch == 'p')
+                        set_week(tt.monday == PERM_MONDAY ? view::wanted_monday() : PERM_MONDAY);
                     else if (e.ch == 'w') {
-                        auto ws = weeks(tt.monday);
-                        wsel = 0;
-                        for (size_t i = 0; i < ws.size(); i++)
-                            if (ws[i].first == tt.monday) wsel = i;
-                        menu = true;
+                        pick_week();
+                        break;
                     }
-                    // the header line is the week control: arrows step, the label opens the menu
                     else if (e.mouse && e.btn == 0 && e.fin == 'M' &&
-                             e.my == (long)geom.hdr + 1 && geom.prev) {
-                        if ((size_t)e.mx == geom.prev) set_week(step(-7));
-                        else if ((size_t)e.mx == geom.next) set_week(step(7));
-                        else if ((size_t)e.mx >= geom.lbl0 && (size_t)e.mx <= geom.lbl1) {
-                            auto ws = weeks(tt.monday);
-                            wsel = 0;
-                            for (size_t i = 0; i < ws.size(); i++)
-                                if (ws[i].first == tt.monday) wsel = i;
-                            menu = true;
-                        }
-                    }
-                    else if (e.mouse && e.btn == 0 && e.fin == 'M' && nd && nh) {
-                        long r = e.my - 1 - (long)geom.top, cx = e.mx - 1 - (long)(geom.gut + geom.left);
+                             (size_t)(e.my - 1) == geom.hdr && e.mx > (long)geom.left) {
+                        size_t cx = (size_t)e.mx - 1 - geom.left;  // "< label >"
+                        if (cx < 2) set_week(week_step(-7));
+                        else if (cx < 2 + geom.lab) {
+                            pick_week();
+                            break;
+                        } else if (cx <= 3 + geom.lab) set_week(week_step(7));
+                    } else if (e.mouse && e.btn == 0 && e.fin == 'M' && nd && nh) {
+                        long r = e.my - 1 - (long)geom.top,
+                             cx = e.mx - 1 - (long)(geom.gut + geom.left);
                         if (r < 0 || cx < 0) continue;
                         size_t d = (size_t)r / geom.blk, h = (size_t)cx / (geom.cw + 1);
                         if (d >= nd || h >= nh) continue;
@@ -1253,7 +978,10 @@ int main(int argc, char **argv) {
                         cd = d;
                         chr = h;
                         click_at = again ? 0 : t;
-                        if (again) pop = tt.at(cd, chr) != nullptr;
+                        if (again) {
+                            detail();
+                            break;
+                        }
                     }
                 }
             }
