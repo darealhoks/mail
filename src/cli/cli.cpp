@@ -33,8 +33,10 @@ using view::ymd_local;
 using view::ymd_plus;
 
 void err(const std::string &what) {
-    fprintf(stderr, "%s %s\n", c("1;31", CLI_NAME ":", 2).c_str(), c("1", what, 2).c_str());
+    fprintf(stderr, "%s %s\n", c("1;31", CLI_NAME ":", 2).c_str(), what.c_str());
 }
+
+std::string head(const std::string &label) { return c("90", "#") + " " + c("1", label); }
 
 std::string source_names() {
     std::string n;
@@ -51,7 +53,7 @@ int help() {
     printf("usage: %s [filter...]        %s\n", CLI_NAME,
            c("90", "show the feed, most urgent last").c_str());
     printf("       %s <command> [args]\n\n", CLI_NAME);
-    printf("%s\n", c("1", "commands").c_str());
+    printf("%s\n", head("commands").c_str());
     row("dismiss, d <n>...", "hide items by their feed number");
     row("open, o <n>", "open item <n> in a browser");
     row("marks, m [subj...]", "marks, newest first; subject abbrevs filter");
@@ -62,7 +64,7 @@ int help() {
     row("auth, a [source]", "sign-in state; a source name to sign in");
     row("help, h", "this; --help works after any command");
     row("--version", "print the version");
-    printf("\n%s %s\n", c("1", "flags").c_str(),
+    printf("\n%s %s\n", head("flags").c_str(),
            c("90", "one-shot overrides of " + config_path()).c_str());
     row("-n, --limit <n>", "cap the listing (0 = all)");
     row("--links, --no-links", "show or hide the item urls");
@@ -72,7 +74,7 @@ int help() {
     row("-s, --simple", "next: alias for -f \"" NEXT_FMT_SIMPLE "\"");
     row("-f, --format <fmt>", "next: %t %e begin/end, %s %S subject, %r room, %u teacher,");
     row("", "%h hour, %d date, %m \"in 12m\", %! changed, %% literal");
-    printf("\n%s %s\n", c("1", "filters").c_str(),
+    printf("\n%s %s\n", head("filters").c_str(),
            c("90", "bare words, ANDed: a kind (info, task, test, mark, change), "
                    "a class abbrev, a source (" + source_names() + ")")
                .c_str());
@@ -84,7 +86,6 @@ void usage() {
     fprintf(stderr, "       %s\n", c("90", CLI_NAME " help  for the full list", 2).c_str());
 }
 
-using paint::mark_color;
 using paint::term_cols;
 
 int show(const std::vector<std::string> &argf) {
@@ -108,7 +109,7 @@ int show(const std::vector<std::string> &argf) {
 
     size_t w = (size_t)term_cols();
     bool tty = isatty(1);
-    for (const paint::Post &p : paint::feed_posts(f, w, true))
+    for (const paint::Post &p : paint::feed_posts(f, w))
         for (const std::string &l : p.lines) puts(tty ? paint::fit(l, w).c_str() : l.c_str());
     return 0;
 }
@@ -189,7 +190,7 @@ int dismiss(int argc, char **argv) {
         return 2;
     }
     s.dismiss(ids);
-    printf("%s %zu\n", c("1;32", "dismissed").c_str(), ids.size());
+    printf("dismissed %zu\n", ids.size());
     return 0;
 }
 
@@ -276,8 +277,8 @@ int next_lesson() {
     long long now = (long long)time(nullptr);
     std::string day = bl.date == ymd_local(now) ? "" : std::string(paint::DAYNAME[tm.tm_wday]) + " ";
     printf("%s%s  %s  %s\n", c("90", day).c_str(),
-           c(paint::accent_bold(), hhmm(bl.begins) + "-" + hhmm(bl.ends)).c_str(),
-           c("1", fmt_lesson(bl.subject_name.empty() ? "%s" : "%S (%s)", bl, best)).c_str(),
+           c("1", hhmm(bl.begins) + "-" + hhmm(bl.ends)).c_str(),
+           fmt_lesson(bl.subject_name.empty() ? "%s" : "%S (%s)", bl, best).c_str(),
            c("90", trim(bl.room + (bl.teacher.empty() ? "" : "  " + bl.teacher) +
                         (bl.state == "!" ? "  changed" : "") + "  " + in_mins(best - now)))
                .c_str());
@@ -292,7 +293,7 @@ void line(const char *label, const char *sgr, const std::string &state, const st
 }
 
 void source_status(const view::SourceStatus &st, bool off) {
-    printf("%s\n", c("1;33", st.name).c_str());
+    printf("%s\n", head(st.name).c_str());
     if (!st.signed_in)
         line("session", "1;31", "NOT SIGNED IN", "run: " CLI_NAME " auth " + st.name);
     else if (!st.error.empty())
@@ -302,7 +303,7 @@ void source_status(const view::SourceStatus &st, bool off) {
         line("refreshed", "90", ago(st.refreshed_at), "");
     }
     bool loud = st.stale && !off;
-    line("fetched", loud ? "1;31" : "0;32", ago(st.fetched_at),
+    line("fetched", loud ? "0;33" : "0;32", ago(st.fetched_at),
          off ? "no internet" : loud && st.fetched_at ? "stale" : "");
 }
 
@@ -315,8 +316,8 @@ void ready() {
     for (const std::string &name : h.unsigned_names) {
         const Source *src = source(name);
         if (!src || !isatty(0) || !isatty(1)) {
-            fprintf(stderr, "%s\n", c("1;31", name + " not authed, run " CLI_NAME " auth " + name,
-                                      2).c_str());
+            fprintf(stderr, "%s\n",
+                    c("1;31", name + " not authed, run " CLI_NAME " auth " + name, 2).c_str());
             continue;
         }
         printf("%s ", c("1;31", std::string(src->pretty) + " is unsigned. Sign in? [Y/n]").c_str());
@@ -339,13 +340,12 @@ void ready() {
 int new_summary() {
     Store s;
     view::NewCounts n = view::new_counts(s);
-    auto count = [](int k, const char *one, const char *many, const char *sgr) {
-        if (k) printf("%s %s\n", c(sgr, std::to_string(k)).c_str(),
-                      c("1", k == 1 ? one : many).c_str());
+    auto count = [](int k, const char *one, const char *many) {
+        if (k) printf("%s %s\n", c("1", std::to_string(k)).c_str(), k == 1 ? one : many);
     };
-    count(n.msgs, "new message", "new messages", "1;34");
-    count(n.work, "new task", "new tasks", "1;33");
-    count(n.marks, "new mark", "new marks", "1;35");
+    count(n.msgs, "new message", "new messages");
+    count(n.work, "new task", "new tasks");
+    count(n.marks, "new mark", "new marks");
     view::Health h = view::health(s);
     for (const std::string &name : h.unsigned_names)
         printf("%s\n", c("1;31", name + " not authed, " CLI_NAME " auth " + name).c_str());

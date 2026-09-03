@@ -4,10 +4,10 @@
 
 #include "view.h"
 
-// shared paint helpers: the sgr literals of the feed live here and in the frontends only
+// shared paint helpers: every sgr literal lives in these and in the frontends, nowhere else
 namespace paint {
 
-int term_cols(bool cap = true);  // cap: clamp to 100 for prose; the grid passes false
+int term_cols(bool cap = true);  // cap: clamp to 68 for prose; the grid passes false
 // the real terminal size, uncapped: what a full-screen frontend owns
 void term_size(int &rows, int &cols);
 size_t utf8_len(const std::string &s);
@@ -22,7 +22,7 @@ std::vector<std::string> wrap(const std::string &s, size_t width);
 // general.accent as sgr params: a colour name, a 0-255 palette index, or #rrggbb
 std::string accent_sgr(std::string v);  // parse one accent value; testable half of accent()
 const char *accent();     // foreground
-const char *accent_bold();  // "1;<accent>", the heading colour every list uses
+const char *accent_bold();  // "1;<accent>"
 const char *accent_bg();  // as a background, via reverse video: text takes the terminal bg
 // general.bar: the status bar fill, same value grammar as the accent; "none" is unfilled
 const char *bar_bg();
@@ -59,10 +59,10 @@ struct Post {
     std::vector<std::string> lines;
     std::string url;
 };
-// numbered: prefix each post with its feed position, the number `dismiss`/`open` take
-std::vector<Post> feed_posts(const view::Feed &f, size_t width, bool numbered);
-// the school year the totals cover, then "MAT  3/48  6%" per subject; red past the school's
-// threshold, uncoloured when it sent none
+// each post opens with its feed position, the number `dismiss`/`open` take
+std::vector<Post> feed_posts(const view::Feed &f, size_t width);
+// the school year the totals cover, then "MAT  3/48  6%" per subject; the percent goes red past
+// the school's threshold, yellow past school.absence_warn, uncoloured when it sent none
 std::vector<std::string> absence_lines(const view::Absences &a);
 // period headers, the mark rows, then the averages; the class column appears only when the
 // rows hold more than one class
@@ -83,7 +83,6 @@ inline const size_t NO_CELL = (size_t)-1;  // grid_lines: no cursor cell
 std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t ch, int rows,
                                     int cols, Geom &g);
 
-inline const char *NEW_CHIP = "1;7;31";  // reverse: red block, text in the terminal bg
 inline const char *DAYNAME[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
 
 }  // namespace paint

@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "bakalari.h"
 #include "classify.h"
 #include "config.h"
 #include "http.h"
@@ -411,6 +412,21 @@ int check_paint() {
     CHECK(!strcmp(paint::avg_color(1.4), mark_color("1")));
     CHECK(!strcmp(paint::avg_color(1.5), mark_color("2")));
 
+    {  // the bucket heading, and a body lined up under the number gutter
+        view::Feed f;
+        Item it = stub("teams");
+        it.title = "Title";
+        it.body = "Title\nbody word";
+        f.items = {it};
+        f.rows = {{1, false, 1, "MAT"}};
+        std::vector<paint::Post> posts = paint::feed_posts(f, 60);
+        CHECK(posts.size() == 1 && posts[0].lines.size() == 5);
+        std::vector<std::string> pl;
+        for (const auto &l : posts[0].lines) pl.push_back(paint::strip_sgr(l));
+        CHECK(pl[0] == "# upcoming" && pl[1].empty());
+        CHECK(pl[2].compare(0, 2, "1 ") == 0 && pl[3] == "  body word");
+    }
+
     CHECK(paint::accent_sgr("Magenta") == "35");
     CHECK(paint::accent_sgr("brightcyan") == "96");
     CHECK(paint::accent_sgr("9") == "91");
@@ -468,6 +484,46 @@ int check_paint() {
                 return 1;
             }
     }
+
+    {  // the state is in the text, not only in the colour: a colourless terminal keeps it
+        view::Timetable st;
+        st.monday = "2026-08-17";
+        st.days = {"2026-08-17"};
+        st.hours = {"1", "2"};
+        st.rows = {{"bakalari", "2026-08-17", "1", "CJL", "", "", "", "x", "", "", "", ""},
+                   {"bakalari", "2026-08-17", "2", "MAT", "", "", "", "!", "", "", "", ""}};
+        st.grid = {&st.rows[0], &st.rows[1]};
+        paint::Geom g{};
+        std::string row;
+        for (const auto &line : paint::grid_lines(st, paint::NO_CELL, paint::NO_CELL, 0, 80, g))
+            if (line.find("CJL") != std::string::npos) row = paint::strip_sgr(line);
+        CHECK(row.find("~CJL~") != std::string::npos && row.find("MAT!") != std::string::npos);
+    }
+
+    {  // the running lesson stars itself, so it stays findable with the cursor parked elsewhere
+        time_t nt = time(nullptr);
+        struct tm ltm {};
+        localtime_r(&nt, &ltm);
+        int m = ltm.tm_hour * 60 + ltm.tm_min;
+        auto hm = [](int v) {
+            return std::to_string(v / 60) + ":" + (v % 60 < 10 ? "0" : "") + std::to_string(v % 60);
+        };
+        view::Timetable nt2;
+        nt2.days = {view::ymd_local((long long)nt)};
+        nt2.monday = nt2.days[0];
+        nt2.hours = {"1", "2"};
+        nt2.rows = {{"bakalari", nt2.days[0], "1", "CJL", "", "", "", "", hm(m ? m - 1 : 0),
+                     hm(m + 1), "", ""},
+                    {"bakalari", nt2.days[0], "2", "MAT", "", "", "", "", "00:00", "00:00", "",
+                     ""}};
+        nt2.grid = {&nt2.rows[0], &nt2.rows[1]};
+        paint::Geom g{};
+        std::string row;
+        for (const auto &line : paint::grid_lines(nt2, paint::NO_CELL, paint::NO_CELL, 0, 80, g))
+            if (line.find("CJL") != std::string::npos) row = paint::strip_sgr(line);
+        CHECK(row.find("CJL") < row.find('*') && row.find("MAT") > row.find('*'));
+        CHECK(row.find('*', row.find("MAT")) == std::string::npos);
+    }
     return 0;
 }
 
@@ -485,6 +541,21 @@ int check_notify() {
     return 0;
 }
 
+int check_hours() {
+    using bakalari::hour_runs;
+    std::vector<bakalari::Span> day{{1, "1", "8:00", "8:45"},   {2, "2", "9:00", "9:45"},
+                                    {3, "3", "10:00", "10:45"}, {4, "4", "11:00", "11:45"},
+                                    {6, "6", "13:00", "13:45"}, {7, "7", "14:00", "14:45"},
+                                    {8, "8", "15:00", "15:45"}};
+    CHECK(hour_runs(day) == "1.-4. hod 8:00 - 11:45, 6.-8. hod 13:00 - 15:45");
+    CHECK(hour_runs({day[4]}) == "6. hod 13:00 - 13:45");
+    CHECK(hour_runs({day[1], day[0], day[1]}) == "1.-2. hod 8:00 - 9:45");  // unsorted, duplicate
+    CHECK(hour_runs({{0, "0", "7:10", ""}, {1, "1", "8:00", "8:45"}}) ==
+          "0. hod 7:10, 1. hod 8:00 - 8:45");  // an unnumbered caption never joins a run
+    CHECK(hour_runs({}).empty());
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -493,7 +564,8 @@ int main() {
     mkdir(dir.c_str(), 0700);
     setenv("XDG_CONFIG_HOME", dir.c_str(), 1);
     int rc = check_config() || check_classify() || check_text() || check_json() || check_view() ||
-             check_paint() || check_store() || check_outlook() || check_notify();
+             check_paint() || check_store() || check_outlook() || check_notify() ||
+             check_hours();
     unlink(config_path().c_str());
     rmdir((dir + "/" APP_NAME).c_str());
     rmdir(dir.c_str());

@@ -8,6 +8,7 @@
 
 #include "http.h"
 #include "json.h"
+#include "paint.h"
 #include "term.h"
 
 namespace teams {
@@ -128,15 +129,16 @@ void print_qr(const std::string &text) {
 int login_interactive() {
     DeviceCode dc = device_start();
     // no prefill: v2.0 devicecode returns no verification_uri_complete and ?otc= is ignored
+    std::string url_sgr = "4;" + std::string(paint::accent());
     printf("%s\n%s\n%s %s %s\n\n", c("1", "to sign in, open:").c_str(),
-           c("4;36", dc.verification_uri).c_str(), c("1", "and enter code:").c_str(),
-           c("1;33", dc.user_code).c_str(),
+           c(url_sgr.c_str(), dc.verification_uri).c_str(), c("1", "and enter code:").c_str(),
+           c(paint::accent(), dc.user_code).c_str(),
            c("90", "(valid for " + std::to_string(dc.expires_in / 60) + "m)").c_str());
     print_qr(qr_upper(dc.verification_uri));
     puts(c("90", "waiting for sign-in...").c_str());
     fflush(stdout);  // device_poll blocks for minutes; don't sit in a pipe buffer
     device_poll(dc);
-    printf("%s %s\n", c("1;33", "teams").c_str(), c("1;32", "signed in").c_str());
+    printf("%s %s\n", c("1", "teams").c_str(), c("1;32", "signed in").c_str());
     return 0;
 }
 

@@ -150,14 +150,18 @@ std::string status(Mode mode, const std::map<char, Mode> &keys, const std::strin
                    std::vector<std::pair<size_t, size_t>> &chips) {
     std::string m = msg, age = age_in;
     size_t tw = 0;
-    std::string strip;
+    std::string strip, fill = bar_bg(), sep = fill.empty() ? "" : ";" + fill;
     auto build = [&](bool compact) {
         strip = tabs(mode, keys, tw, hits, compact);
         chips.assign(filters.size(), {0, 0});
-        for (size_t i = 0; i < filters.size(); i++) {  // click one to drop it
-            chips[i] = {tw + 1, tw + utf8_len(filters[i]) + 2};
-            strip += c("1;7;33", " " + filters[i] + " ");
-            tw += utf8_len(filters[i]) + 2;
+        if (filters.empty()) return;
+        strip += c(("90" + sep).c_str(), "/");
+        tw += 1;
+        for (size_t i = 0; i < filters.size(); i++) {  // click one word to drop it
+            std::string w = (i ? " " : "") + filters[i];
+            chips[i] = {tw + 1, tw + utf8_len(w)};
+            strip += c(("39" + sep).c_str(), w);
+            tw += utf8_len(w);
         }
     };
     build(false);
@@ -177,12 +181,10 @@ std::string status(Mode mode, const std::map<char, Mode> &keys, const std::strin
     }
     std::string gap(used < width ? width - used : 0, ' ');
     // every segment repaints the fill: c() resets at each segment end
-    std::string fill = bar_bg();
-    std::string sep = fill.empty() ? "" : ";" + fill;
     std::string msg_sgr = m.empty() ? "90" : msg_col;
     return fit(strip + c((msg_sgr + sep).c_str(), (m.empty() ? "" : " " + m) + " " + gap) +
                    c(((age_red ? "1;31" : "90") + sep).c_str(), age + " ") +
-                   c(("1;" + std::string(accent()) + sep).c_str(), " " + pos + " ") +
+                   c((std::string(accent()) + sep).c_str(), " " + pos + " ") +
                    c(("90" + sep).c_str(), " "),
                width);
 }
@@ -248,7 +250,7 @@ void wait_key() {
 void show_page(const std::string &title, const std::vector<Row> &rows, int trows, int tcols) {
     size_t kw = 0;
     for (const auto &[k, v] : rows) kw = std::max(kw, utf8_len(k));
-    std::string out = "\033[H\033[2J  " + c(accent_bold(), title) + "\r\n\r\n";
+    std::string out = "\033[H\033[2J  " + c("90", "# ") + c("1", title) + "\r\n\r\n";
     int left = trows - 3;  // title, its blank line, and the footer
     for (const auto &[k, v] : rows) {
         if (left-- <= 0) break;
@@ -256,7 +258,7 @@ void show_page(const std::string &title, const std::vector<Row> &rows, int trows
             out += "\r\n";
             continue;
         }
-        out += fit("  " + c(accent(), plain_cut(k, kw)) + "  " + c("39", v), (size_t)tcols) +
+        out += fit("  " + c("90", plain_cut(k, kw)) + "  " + c("39", v), (size_t)tcols) +
                "\r\n";
     }
     out += "\033[" + std::to_string(trows) + ";1H" + c("90", "  press any key to return…");
@@ -284,7 +286,7 @@ std::string week_page(Store &store, const std::string &cur_mon, int trows, int t
     std::string b;
     Ev e;
     for (;;) {
-        std::string out = "\033[H\033[2J  " + c(accent_bold(), "week") + "\r\n\r\n";
+        std::string out = "\033[H\033[2J  " + c("90", "# ") + c("1", "week") + "\r\n\r\n";
         for (size_t i = 0; i < shown; i++)
             out += fit((i == sel ? std::string("\033[") + accent() + "m▎\033[0m " : "  ") +
                            c(stored[i] ? "39" : "90", labs[i]),
@@ -356,7 +358,7 @@ std::vector<Row> lesson_rows(const Lesson &l) {
 void auth_page(const std::vector<std::string> &want) {
     leave();
     fputs("\033[H\033[2J", stdout);
-    printf("%s\n\n", c(accent_bold(), "sign in").c_str());
+    printf("%s\n\n", (c("90", "# ") + c("1", "sign in")).c_str());
     bool any = false;
     for (const Source &src : sources()) {
         if (std::find(want.begin(), want.end(), src.name) == want.end()) continue;
@@ -364,7 +366,7 @@ void auth_page(const std::vector<std::string> &want) {
         try {
             src.login();
         } catch (const std::exception &e) {
-            fprintf(stderr, "%s\n", c("1;31", e.what()).c_str());
+            fprintf(stderr, "%s\n", c("1;31", e.what(), 2).c_str());
         }
         putchar('\n');
     }
@@ -380,16 +382,17 @@ void auth_page(const std::vector<std::string> &want) {
 // allowed to scroll past the end or the last posts (or any post at all, when the feed fits the
 // screen) are unreachable
 void pane(std::string &out, const std::vector<std::string> &lines, size_t &top, size_t lo,
-          size_t hi, bool gutter, bool overscroll, int rows, int cols) {
+          size_t hi, bool gutter, bool overscroll, int rows, int cols, int pad = 0) {
     size_t max_top = lines.size() > (size_t)rows ? lines.size() - (size_t)rows : 0;
     if (overscroll) max_top = lines.empty() ? 0 : lines.size() - 1;
     if (top > max_top) top = max_top;
     for (int r = 0; r < rows; r++) {
         size_t li = top + (size_t)r;
         if (li < lines.size()) {
+            out.append((size_t)pad, ' ');
             if (gutter)
                 out += li >= lo && li < hi ? std::string("\033[") + accent() + "m▎\033[0m " : "  ";
-            out += fit(lines[li], (size_t)cols - (gutter ? 2 : 0));
+            out += fit(lines[li], (size_t)(cols - pad) - (gutter ? 2 : 0));
         }
         out += "\033[K";
         if (r < rows - 1) out += "\r\n";
@@ -431,7 +434,7 @@ int main(int argc, char **) {
         Store store;
         std::map<char, Mode> keys = keymap();
         Mode mode = M_FEED;
-        int rows = 24, cols = 80;
+        int rows = 24, cols = 80, pw = 68, lead = 0;
         bool relayout = true, first = true;
         std::string msg;
         long long msg_at = 0, click_at = 0;
@@ -497,6 +500,8 @@ int main(int argc, char **) {
                 resized = 0;
                 term_size(rows, cols);
                 rows -= 1;
+                pw = std::min(cols - 2, 68);  // 68 = the prose cap in paint::term_cols
+                lead = (cols - pw - 2) / 2;   // 2 = pane's gutter; the block centres like the grid
                 relayout = true;
             }
             if (relayout) {
@@ -504,7 +509,7 @@ int main(int argc, char **) {
                 if (mode == M_FEED) {
                     fsnap = view::feed_rows(store, filters,
                                             (size_t)config().num("general.limit"));
-                    posts = feed_posts(fsnap, (size_t)cols - 2, false);
+                    posts = feed_posts(fsnap, (size_t)pw);
                     flat.clear();
                     owner.clear();
                     start.clear();
@@ -521,7 +526,7 @@ int main(int argc, char **) {
                                 stops.push_back(flat.size());
                                 last = flat.size();
                             }
-                            flat.push_back(fit(pl[i], (size_t)cols - 2));
+                            flat.push_back(fit(pl[i], (size_t)pw));
                             owner.push_back(p);
                         }
                     }
@@ -549,7 +554,7 @@ int main(int argc, char **) {
                             if (r.klass == subject) one.rows.push_back(r);
                         for (const auto &a : msnap.averages)
                             if (std::get<0>(a) == subject) one.averages.push_back(a);
-                        mlines = mark_lines(one, (size_t)cols - 2);
+                        mlines = mark_lines(one, (size_t)pw);
                     }
                     if (mlines.empty()) mlines.push_back(c("90", "no marks"));
                     if (msel >= msubjects.size()) msel = msubjects.empty() ? 0 : msubjects.size() - 1;
@@ -591,7 +596,7 @@ int main(int argc, char **) {
                 pos = std::to_string(posts.empty() ? 0 : sel + 1) + "/" +
                       std::to_string(posts.size());
                 if (flat.empty())
-                    out += "\033[90mnothing to show\033[0m\033[K\033[J\033[" +
+                    out += c("90", "nothing to show") + "\033[K\033[J\033[" +
                            std::to_string(rows + 1) + ";1H";
                 else {
                     size_t len = posts[sel].lines.size();
@@ -600,7 +605,7 @@ int main(int argc, char **) {
                         size_t pad = ((size_t)rows - len) / 2;
                         top = start[sel] > pad ? start[sel] - pad : 0;
                     }
-                    pane(out, flat, top, start[sel], start[sel] + len, true, true, rows, cols);
+                    pane(out, flat, top, start[sel], start[sel] + len, true, true, rows, cols, lead);
                 }
             } else if (mode == M_MARKS) {
                 bool list = subject.empty() && !msubjects.empty();
@@ -610,10 +615,10 @@ int main(int argc, char **) {
                     if (msel >= mtop + (size_t)rows) mtop = msel - (size_t)rows + 1;
                 }
                 pane(out, mlines, mtop, list ? msel : 0, list ? msel + 1 : 0, true, false, rows,
-                     cols);
+                     cols, lead);
             } else if (mode == M_ABSENCE) {
                 pos = std::to_string(absnap.rows.size()) + " subjects";
-                pane(out, alines, atop, 0, 0, true, false, rows, cols);
+                pane(out, alines, atop, 0, 0, true, false, rows, cols, lead);
             } else {
                 tlines = grid_lines(tt, cd, chr, rows, cols, geom);
                 pos = tt.monday == PERM_MONDAY

@@ -67,6 +67,11 @@ no status line, no gripe, no sign-in prompt.
   (GET /api/3/komens/attachment/{Id} would serve them)
 - items: homework -> task (due_at=DateEnd), mark, komens -> classifier kind + due_at,
   timetable Atoms[].Change -> change; src_uid prefixes hw:/mark:/komens:/tt:
+- one change item per day per (ChangeType, title), not per lesson: a day cut from the
+  timetable is 8 atoms and read as 8 "new" items. body is bakalari::hour_runs() over the
+  atoms' Hours captions — contiguous hours collapse to a range, a gap starts a new one, so
+  the times never span an hour that did not change. src_uid tt:<date>:<type>:<title>, so a
+  hour added to the same change later updates the row instead of making a second one
 - timetable atoms also go to the lessons table via put_lessons (see .map/store.md); an atom
   with no hour caption or no subject is dropped, it has nothing to render
 - ids are strings on some endpoints and numbers on others; Subjects[].Id and Abbrev are

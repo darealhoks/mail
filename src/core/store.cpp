@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS absences(
 );
 )";
 
-constexpr int SCHEMA_VERSION = 5;
+constexpr int SCHEMA_VERSION = 6;
 
 std::runtime_error err(sqlite3 *db) {
     return std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
@@ -200,8 +200,12 @@ Store::Store(const std::string &path) {
     exec(db, "PRAGMA journal_mode=WAL");
     // the schema write must not run on every open — a reader would then need the write lock and
     // fail against a fetching maild. bump SCHEMA_VERSION with any SCHEMA change
-    if (user_version(db) < SCHEMA_VERSION) {
+    int was = user_version(db);
+    if (was < SCHEMA_VERSION) {
         exec(db, SCHEMA);
+        // per-lesson timetable changes became one item per day, so their src_uid shape changed;
+        // the old rows would otherwise sit in the feed forever as duplicates
+        if (was && was < 6) exec(db, "DELETE FROM items WHERE src_uid LIKE 'tt:%'");
         // must be a literal number: sqlite takes an unquoted identifier here as the string 0
         exec(db, ("PRAGMA user_version=" + std::to_string(SCHEMA_VERSION)).c_str());
     }

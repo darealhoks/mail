@@ -165,8 +165,38 @@ Lesson lesson_of(Side &t, El at, const std::string &date) {
     return l;
 }
 
+struct Change {
+    std::string date, type, title;
+    std::vector<std::string> klass;
+    std::vector<Span> hours;
+};
+
 }  // namespace
 
+// the times stay true to the hours actually named: a gap in the run starts a new one
+std::string hour_runs(std::vector<Span> h) {
+    std::sort(h.begin(), h.end(), [](const Span &a, const Span &b) {
+        return a.n != b.n ? a.n < b.n : a.caption < b.caption;
+    });
+    h.erase(std::unique(h.begin(), h.end(),
+                        [](const Span &a, const Span &b) {
+                            return a.n == b.n && a.caption == b.caption;
+                        }),
+            h.end());
+    std::string out;
+    for (size_t i = 0; i < h.size();) {
+        size_t j = i;
+        while (j + 1 < h.size() && h[j].n > 0 && h[j + 1].n == h[j].n + 1) j++;
+        if (!out.empty()) out += ", ";
+        out += h[i].caption + ".";
+        if (j > i) out += "-" + h[j].caption + ".";
+        out += " hod";
+        std::string t = trim(h[i].begins + (h[j].ends.empty() ? "" : " - " + h[j].ends));
+        if (!t.empty()) out += " " + t;
+        i = j + 1;
+    }
+    return out;
+}
 
 void login(const std::string &user, const std::string &pass) {
     std::string body = form("client_id", cfg().client_id) + "&" + form("grant_type", "password") + "&" +
@@ -202,7 +232,7 @@ bool ask(const char *label, std::string &out) {
 }
 
 int login_interactive() {
-    printf("%s\n", c("1;33", "Bakalari").c_str());
+    printf("%s\n", c("1", "Bakalari").c_str());
     if (base().empty()) {
         std::string url;
         if (!ask("Url:", url)) return 1;
@@ -218,7 +248,7 @@ int login_interactive() {
     std::string p(pass);
     memset(pass, 0, p.size());
     login(u, p);
-    printf("%s %s\n", c("1;33", "Bakalari").c_str(), c("1;32", "signed in").c_str());
+    printf("%s %s\n", c("1", "Bakalari").c_str(), c("1;32", "signed in").c_str());
     return 0;
 }
 
@@ -353,6 +383,9 @@ std::vector<Item> fetch(Store &store) {
 
     // this week and the next; the lessons table is what `mailc timetable` renders
     std::map<std::string, std::string> by_name;  // full subject name -> abbrev, for absences
+    // keyed date first so the emitted items come out in day order; both weeks share the map
+    // because a change listed in one week can carry a date that lands in the other
+    std::map<std::string, Change> changes;
     for (long long week : {now(), now() + 7 * DAY}) {
         Json j(api("/api/3/timetable/actual?date=" + ymd(week)));
         Side S = side_tables(j.root, &by_name);
@@ -371,21 +404,26 @@ std::vector<Item> fetch(Store &store) {
                 Lesson l = lesson_of(S, at, dd);
                 l.state = type == "Canceled" || type == "Removed" ? "x" : changed ? "!" : "";
                 l.change = changed ? trim(desc.empty() ? what : what + ": " + desc) : "";
+                if (changed) {
+                    // a change listed under one day can carry another day's date
+                    std::string date = s(ch, "Day");
+                    if (date.empty()) date = s(day, "Date");
+                    date = date.substr(0, 10);
+                    std::string title = trim(desc.empty() ? what : what + ": " + desc);
+                    Change &g = changes[date + "\x1f" + type + "\x1f" + title];
+                    g.date = date;
+                    g.type = type;
+                    g.title = title;
+                    std::string cap = trim(l.hour);
+                    while (!cap.empty() && cap.back() == '.') cap.pop_back();
+                    if (!cap.empty())
+                        g.hours.push_back({(int)strtol(cap.c_str(), nullptr, 10), cap, l.begins,
+                                           l.ends});
+                    if (!l.subject.empty() &&
+                        std::find(g.klass.begin(), g.klass.end(), l.subject) == g.klass.end())
+                        g.klass.push_back(l.subject);
+                }
                 if (!l.hour.empty() && !l.subject.empty()) grid.push_back(std::move(l));
-                if (!changed) continue;
-                // a change listed under one day can carry another day's date
-                std::string date = s(ch, "Day");
-                if (date.empty()) date = s(day, "Date");
-                Item i;
-                i.source = "bakalari";
-                i.kind = "change";
-                i.klass = S.subject[trim(s(at, "SubjectId"))];
-                i.title = desc.empty() ? what : what + ": " + desc;
-                i.body = trim(s(ch, "Hours") + " " + s(ch, "Time"));
-                i.event_at = classify::epoch(date);
-                i.url = base() + "/timetable";  // the only module not under /next/*.aspx
-                i.src_uid = "tt:" + date.substr(0, 10) + ":" + s(at, "HourId") + ":" + type;
-                out.push_back(std::move(i));
             }
         }
         if (monday.empty()) continue;
@@ -399,6 +437,20 @@ std::vector<Item> fetch(Store &store) {
                 grid.push_back(std::move(n));
             }
         store.put_lessons("bakalari", monday, sunday, grid);
+    }
+
+    for (auto &kv : changes) {
+        Change &g = kv.second;
+        Item i;
+        i.source = "bakalari";
+        i.kind = "change";
+        for (const auto &k : g.klass) i.klass += (i.klass.empty() ? "" : ", ") + k;
+        i.title = g.title;
+        i.body = hour_runs(g.hours);
+        i.event_at = classify::epoch(g.date);
+        i.url = base() + "/timetable";  // the only module not under /next/*.aspx
+        i.src_uid = "tt:" + g.date + ":" + g.type + ":" + g.title;
+        out.push_back(std::move(i));
     }
 
     // the recurring grid, what the table falls back to out of season. it changes per semester,

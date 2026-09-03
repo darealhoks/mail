@@ -30,7 +30,7 @@ const struct Default {
     {"general.notify", "wispctl notify", true},
     {"general.browser", "xdg-open", true},
     {"general.accent", "blue", true},
-    {"general.bar", "#070b14", true},
+    {"general.bar", "none", true},
     {"general.limit", "0", true},
     {"general.links", "no", true},
     {"general.blacklist", "anj", true},

@@ -17,6 +17,8 @@ Warnings carry `<config path>:<line>`.
     marks_newest_last yes  marks oldest first, so the newest sit by the prompt; no = newest first
     notify           notification exec hook, empty = silent
     browser          opener for `mailc open`, default xdg-open
+    accent     blue  links, code, selection, the current thing; a name, a 0-255 index, #rrggbb
+    bar        none  tui status bar fill, same grammar; none = unfilled
 
     [source.bakalari]
     url              your school's bakalari base url; empty by default, fetch errors until set
@@ -54,6 +56,14 @@ Warnings carry `<config path>:<line>`.
     [bind]
     rozvrh = timetable               free-form keys, exempt from the unknown-key warning
     t      = next -s
+
+Colour devices, and no others: the accent (`general.accent`) is links, literal code, the
+selection, the current thing and the ` NEW ` chip. Green/yellow/red is a state on a scale —
+a mark and an average by grade, absence past `school.absence_warn`/`absence_max`, a due date
+by how near it is, a session ok/stale/expired, warnings and errors. Dim (90) is category and
+metadata: kind, class, source, dates, table heads, footers, idle controls. In the grid a
+cancelled lesson is `~MAT~` in red and a changed one `MAT!` in green. Every coloured state
+also carries its word, glyph or number, so NO_COLOR loses nothing.
 
 The timetable grid sizes itself in one place, `paint::table_layout` (`src/view/paint.cpp`),
 used by both `mailc timetable` and the tui: column width is the widest cell content the
@@ -97,13 +107,14 @@ user types and matches ascii, so `Čeština` is `cestina`.
 when the year rolls, and dismissed stays dismissed (insert is OR IGNORE on (source,src_uid)).
 
 School year rolls on 1 August; `school.half_end` splits it in two. Marks are printed under
-`— 25/26 · H1 —` headers, oldest first (`general.marks_newest_last`); the feed is not.
+`# 25/26 · H1` headings, oldest first (`general.marks_newest_last`); the feed is not.
 
-Mark colors and the average both go through `school.points`/`school.mark_scale`
+Mark colours and the average both go through `school.points`/`school.mark_scale`
 (`points_mark`, `mark_scale` in config.h): a `got/max` mark is scored by percent floors, a
-plain digit by the scale, and `1-` is half a grade worse. An average prints as `1,50 (2)`
+plain digit by the scale, and `1-` is half a grade worse. `paint::mark_color` runs 1 and 2
+green, 3 yellow, 4 and 5 red, bold at either end. An average prints as `1,50 (2)`
 (`paint::avg_str`/`avg_color`), the bracket being `avg_mark()` on `school.avg_round`. In the
-tui a subject whose every mark is ungradeable shows a green `N` instead.
+tui a subject whose every mark is ungradeable shows an uncoloured `N` instead.
 
 Absence colours come from `school.absence_warn`/`absence_max`, not from upstream: Bakalari's
 `PercentageThreshold` is stored per row but only used when `absence_max` is 0, since the limit
