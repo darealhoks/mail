@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <ctime>
+#include <sqlite3.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -169,6 +170,8 @@ int check_text() {
     CHECK(plain_text("</b>x") == "x");       // stray close is not a marker
     CHECK(plain_text("<b>https://x.y/z</b>") == "*https://x.y/z*");
     CHECK(text::style_strip("*a* _b_") == "a b");
+    CHECK(text::style_strip("3K_FYZ_LAB_SK2_26/27") == "3K_FYZ_LAB_SK2_26/27");
+    CHECK(text::html_unescape("z&amp;amp;#225;hada") == "záhada");  // cards escape more than once
     CHECK(text::strip_invisible("a‌​ b﻿") == "a b");  // preheader padding
     CHECK(text::strip_invisible("– dash stays") == "– dash stays");
 
@@ -192,11 +195,14 @@ int check_json() {
     CHECK(j.num("missing", -1) == -1);
     bool threw = false;
     try {
-        Json bad("{not json");
-    } catch (const std::exception &) {
+        Json bad("<!DOCTYPE html><html>502 Bad Gateway");
+    } catch (const std::exception &e) {
         threw = true;
+        CHECK(std::string(e.what()).find("<!DOCTYPE html>") != std::string::npos);
     }
     CHECK(threw);
+    Json tol("<!DOCTYPE html>", true);
+    CHECK(tol.str("error", "def") == "def");
     return 0;
 }
 
@@ -272,6 +278,30 @@ int check_store() {
         s.drop_deferred();
         CHECK(s.get_state("k") == "v3" && !s.defer);
         CHECK(s.insert_item(stub("teams")));
+    }
+    scrub();
+
+    {
+        Store s(tmp);
+        CHECK(s.insert_item(stub("teams")));
+        CHECK(view::feed_rows(s, {}, 0, false).rows.at(0).is_new);
+        CHECK(view::feed_rows(s, {}, 0, false).rows.at(0).is_new);
+        CHECK(view::feed_rows(s, {}, 0).rows.at(0).is_new);
+        CHECK(!view::feed_rows(s, {}, 0).rows.at(0).is_new);
+        // a watermark stranded above the table by a migration delete must not eat the next
+        // inserts; the reopen replays the migration block
+        s.set_state("seen_feed", "999");
+        sqlite3_exec(s.db, "PRAGMA user_version=6", nullptr, nullptr, nullptr);
+    }
+    {
+        Store s(tmp);
+        CHECK(s.get_state("seen_feed") == "1");
+        Item i = stub("teams");
+        i.src_uid = "later";
+        CHECK(s.insert_item(i));
+        CHECK(view::new_counts(s).msgs == 1);
+        CHECK(view::feed_rows(s, {}, 0).rows.at(1).is_new);
+        CHECK(!view::feed_rows(s, {}, 0).rows.at(1).is_new);
     }
     scrub();
 
@@ -419,8 +449,10 @@ int check_paint() {
         it.body = "Title\nbody word";
         f.items = {it};
         f.rows = {{1, false, 1, "MAT"}};
-        std::vector<paint::Post> posts = paint::feed_posts(f, 60);
+        size_t gw = 0;
+        std::vector<paint::Post> posts = paint::feed_posts(f, 60, &gw);
         CHECK(posts.size() == 1 && posts[0].lines.size() == 5);
+        CHECK(gw == 2 && posts[0].head == 2);  // the heading rows are not part of the selection
         std::vector<std::string> pl;
         for (const auto &l : posts[0].lines) pl.push_back(paint::strip_sgr(l));
         CHECK(pl[0] == "# upcoming" && pl[1].empty());

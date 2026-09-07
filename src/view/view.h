@@ -49,8 +49,10 @@ struct Feed {
     std::vector<std::string> kinds, classes, sources;  // vocabulary, for the bad-filter message
     std::string bad_filter;  // non-empty: unknown word, nothing was read or written
 };
-// filters must already be folded. limit 0 = uncapped
-Feed feed_rows(Store &s, const std::vector<std::string> &filters, size_t limit);
+// filters must already be folded. limit 0 = uncapped. consume_new=false leaves the
+// watermark alone, so a repeated listing keeps showing the same rows as new
+Feed feed_rows(Store &s, const std::vector<std::string> &filters, size_t limit,
+               bool consume_new = true);
 
 struct MarkRow {
     bool is_new;

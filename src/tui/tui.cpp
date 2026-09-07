@@ -434,7 +434,7 @@ int main(int argc, char **) {
         Store store;
         std::map<char, Mode> keys = keymap();
         Mode mode = M_FEED;
-        int rows = 24, cols = 80, pw = 68, lead = 0;
+        int rows = 24, cols = 80, pw = 68, lead = 0, fw = 68, flead = 0;
         bool relayout = true, first = true;
         std::string msg;
         long long msg_at = 0, click_at = 0;
@@ -456,7 +456,7 @@ int main(int argc, char **) {
         size_t cur = 0, top = 0;  // flat line of the current stop; line last painted at row 0
 
         view::Marks msnap;
-        bool msnap_ok = false, marks_seen = false;
+        bool msnap_ok = false, marks_seen = false, feed_seen = false;
         std::string subject;
         std::vector<std::string> mlines, msubjects;
         size_t msel = 0, mtop = 0;
@@ -508,8 +508,13 @@ int main(int argc, char **) {
                 relayout = false;
                 if (mode == M_FEED) {
                     fsnap = view::feed_rows(store, filters,
-                                            (size_t)config().num("general.limit"));
-                    posts = feed_posts(fsnap, (size_t)pw);
+                                            (size_t)config().num("general.limit"), false);
+                    feed_seen = true;
+                    size_t gw = 0;
+                    posts = feed_posts(fsnap, (size_t)pw, &gw);
+                    // the number gutter sits left of the prose column, outside the 68
+                    fw = pw + (int)gw;
+                    flead = std::max(0, (cols - fw - 2) / 2);
                     flat.clear();
                     owner.clear();
                     start.clear();
@@ -526,7 +531,7 @@ int main(int argc, char **) {
                                 stops.push_back(flat.size());
                                 last = flat.size();
                             }
-                            flat.push_back(fit(pl[i], (size_t)pw));
+                            flat.push_back(fit(pl[i], (size_t)fw));
                             owner.push_back(p);
                         }
                     }
@@ -605,7 +610,9 @@ int main(int argc, char **) {
                         size_t pad = ((size_t)rows - len) / 2;
                         top = start[sel] > pad ? start[sel] - pad : 0;
                     }
-                    pane(out, flat, top, start[sel], start[sel] + len, true, true, rows, cols, lead);
+                    // the bucket heading and the trailing blank belong to no selection
+                    pane(out, flat, top, start[sel] + posts[sel].head, start[sel] + len - 1, true,
+                         true, rows, cols, flead);
                 }
             } else if (mode == M_MARKS) {
                 bool list = subject.empty() && !msubjects.empty();
@@ -992,7 +999,8 @@ int main(int argc, char **) {
             }
             if (quit) break;
         }
-        // the marks tab was open at some point: only now do they count as seen
+        // a tab was open at some point: only now do its rows count as seen
+        if (feed_seen) view::feed_rows(store, {}, 0);
         if (marks_seen) view::marks_rows(store, {}, 0);
         return 0;
     } catch (const std::exception &e) {

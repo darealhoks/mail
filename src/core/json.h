@@ -7,7 +7,8 @@
 // read-only view over an untrusted response body; every getter returns the default
 // when the field is missing or of the wrong type, so callers shape-check explicitly
 struct Json {
-    explicit Json(const std::string &text);  // throws std::runtime_error on malformed json
+    // throws std::runtime_error on malformed json unless tolerant, which then reads as {}
+    explicit Json(const std::string &text, bool tolerant = false);
     Json(const Json &) = delete;
     Json &operator=(const Json &) = delete;
 

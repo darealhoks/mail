@@ -141,7 +141,8 @@ double mark_value(const std::string &t) {
     return (t[0] - mark_scale().first + 1) + (t.size() > 1 && t[1] == '-' ? 0.5 : 0);
 }
 
-Feed feed_rows(Store &s, const std::vector<std::string> &filters, size_t limit) {
+Feed feed_rows(Store &s, const std::vector<std::string> &filters, size_t limit,
+               bool consume_new) {
     Feed f;
     // blacklisted classes drop out before numbering, so `d 4` and `o 4` stay contiguous
     std::vector<std::string> ab, fk, fc, fs;  // abbrev and the folded match keys, per item
@@ -176,7 +177,7 @@ Feed feed_rows(Store &s, const std::vector<std::string> &filters, size_t limit) 
     if (!shown) return f;
 
     long long wm = watermark(s, "seen_feed");
-    set_watermark(s, "seen_feed", f.items);
+    if (consume_new) set_watermark(s, "seen_feed", f.items);
 
     // the cap keeps the tail: the feed ends with the most urgent items
     size_t skip = limit && shown > limit ? shown - limit : 0;

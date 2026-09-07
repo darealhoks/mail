@@ -58,9 +58,11 @@ int open_url(const std::string &url);
 struct Post {
     std::vector<std::string> lines;
     std::string url;
+    size_t head = 0;  // leading bucket heading rows: part of the post, not selectable
 };
-// each post opens with its feed position, the number `dismiss`/`open` take
-std::vector<Post> feed_posts(const view::Feed &f, size_t width);
+// each post opens with its feed position, the number `dismiss`/`open` take. `width` is the text
+// column alone; the number gutter sits left of it and comes back in `indent`
+std::vector<Post> feed_posts(const view::Feed &f, size_t width, size_t *indent = nullptr);
 // the school year the totals cover, then "MAT  3/48  6%" per subject; the percent goes red past
 // the school's threshold, yellow past school.absence_warn, uncoloured when it sent none
 std::vector<std::string> absence_lines(const view::Absences &a);

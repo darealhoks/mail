@@ -90,8 +90,15 @@ std::string api(const std::string &path, bool post = false, const std::string &b
                 return r.body;
             }
             throw std::runtime_error("bakalari: " + path + " -> http " +
-                                     std::to_string(r.status));
+                                     std::to_string(r.status) + " " +
+                                     text::first_line(r.body, 80));
         }
+        // the caller parses; naming the path here is the only place that still knows it
+        size_t i = r.body.find_first_not_of(" \t\r\n");
+        if (i == std::string::npos || (r.body[i] != '{' && r.body[i] != '['))
+            throw std::runtime_error("bakalari: " + path + " -> not json: " +
+                                     text::first_line(r.body.substr(i == std::string::npos ? 0 : i),
+                                                      80));
         return r.body;
     }
 }
@@ -202,10 +209,11 @@ void login(const std::string &user, const std::string &pass) {
     std::string body = form("client_id", cfg().client_id) + "&" + form("grant_type", "password") + "&" +
                        form("username", user) + "&" + form("password", pass);
     HttpResponse r = http_post_form(base() + "/api/login", body);
-    Json j(r.body);
+    Json j(r.body, r.status != 200);
     if (r.status != 200) {
         std::string why = "bakalari: login failed (http " + std::to_string(r.status) + " " +
-                          j.str("error_description", j.str("error", "unknown")) + ")";
+                          j.str("error_description",
+                                j.str("error", text::first_line(r.body, 80))) + ")";
         // 400/401 is the server rejecting these credentials; anything else is its own problem
         if (r.status == 400 || r.status == 401) throw SessionExpired(why);
         throw std::runtime_error(why);

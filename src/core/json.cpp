@@ -2,10 +2,22 @@
 
 #include <stdexcept>
 
-Json::Json(const std::string &text) : buf(text) {
+#include "text.h"
+
+Json::Json(const std::string &text, bool tolerant) : buf(text) {
     auto r = parser.parse(buf);
-    if (r.error()) throw std::runtime_error(std::string("json: ") + simdjson::error_message(r.error()));
-    root = r.value();
+    if (!r.error()) {
+        root = r.value();
+        return;
+    }
+    if (tolerant) {
+        buf = simdjson::padded_string("{}", 2);  // an empty object: every getter takes its default
+        root = parser.parse(buf).value();
+        return;
+    }
+    // the body is the diagnosis: a proxy's html error page reads nothing like a truncated payload
+    throw std::runtime_error(std::string("json: ") + simdjson::error_message(r.error()) +
+                             " body: " + text::first_line(text, 120));
 }
 
 std::string Json::str(const char *key, const std::string &def) const {

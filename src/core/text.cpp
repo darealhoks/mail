@@ -27,7 +27,7 @@ std::string utc(long long t, const char *fmt) {
     return b;
 }
 
-std::string html_unescape(const std::string &s) {
+static std::string unescape_once(const std::string &s) {
     static const struct {
         const char *ent;
         const char *rep;
@@ -74,6 +74,16 @@ std::string html_unescape(const std::string &s) {
             o += e;
         }
         i = semi + 1;
+    }
+    return o;
+}
+
+std::string html_unescape(const std::string &s) {
+    std::string o = s;
+    for (int p = 0; p < 4; p++) {  // card and link-preview text arrives escaped several times over
+        std::string n = unescape_once(o);
+        if (n == o) break;
+        o = n;
     }
     return o;
 }
@@ -171,14 +181,21 @@ std::string plain_text(const std::string &html) {
             t += html[i];
         }
     }
-    // card text arrives double-escaped
-    return collapse(html_unescape(html_unescape(t)));
+    return collapse(html_unescape(t));
+}
+
+bool is_marker(const std::string &s, size_t i) {
+    auto wordish = [](unsigned char c) { return isalnum(c) || c >= 0x80 || c == '_'; };
+    if (!strchr("*_`~", s[i])) return false;
+    if (s[i] != '_') return true;
+    return !(i && wordish((unsigned char)s[i - 1]) && i + 1 < s.size() &&
+             wordish((unsigned char)s[i + 1]));
 }
 
 std::string style_strip(const std::string &s) {
     std::string o;
-    for (char c : s)
-        if (!strchr("*_`~", c)) o += c;
+    for (size_t i = 0; i < s.size(); i++)
+        if (!is_marker(s, i)) o += s[i];
     return o;
 }
 

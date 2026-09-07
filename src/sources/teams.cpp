@@ -188,13 +188,13 @@ bool to_item(simdjson::dom::element m, const Channel &ch, Item &out) {
                 }
                 std::string joined;
                 for (const auto &p : parts) {
-                    std::string t = text::collapse(p);
+                    std::string t = text::collapse(text::html_unescape(p));
                     if (!t.empty()) joined += (joined.empty() ? "" : " / ") + t;
                 }
                 if (!joined.empty()) cards.push_back(joined);
             } else {
                 std::string n = jstr(a, "name");
-                if (!n.empty()) files.push_back(text::collapse(n));
+                if (!n.empty()) files.push_back(text::collapse(text::html_unescape(n)));
             }
         }
     }

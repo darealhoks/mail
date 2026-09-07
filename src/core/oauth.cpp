@@ -5,6 +5,7 @@
 
 #include "creds.h"
 #include "http.h"
+#include "text.h"
 
 namespace oauth {
 namespace {
@@ -49,9 +50,12 @@ std::string access_token(const Config &c, const Expired &expired) {
                        "&" + form("refresh_token", refresh->second);
     if (!c.scope.empty()) body += "&" + form("scope", c.scope);
     HttpResponse r = http_post_form(c.token_url, body);
-    Json j(r.body);
+    // only a 200 is promised to be json; a proxy or a down backend answers html and that must
+    // still surface as the http failure it is, not as a parse error
+    Json j(r.body, r.status != 200);
     if (r.status == 200) return save_tokens(c, j);
     std::string err = j.str("error");
+    if (err.empty()) err = text::first_line(r.body, 80);
     if (expired(r.status, j))
         throw SessionExpired(c.creds_name + ": session expired (" +
                              j.str("error_description", err) + ")");

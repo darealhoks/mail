@@ -19,6 +19,9 @@ std::string html_unescape(const std::string &s);
 std::string collapse(const std::string &s);
 // html -> collapsed text with style markers
 std::string plain_text(const std::string &html);
+// is s[i] a style marker, or just that character? `_` between word chars is literal, so
+// class names like 3K_FYZ_SK2_26/27 keep their underscores
+bool is_marker(const std::string &s, size_t i);
 // drop the style markers again
 std::string style_strip(const std::string &s);
 // marketing mail pads its preheader with zero-width joiners so the preview line looks short;

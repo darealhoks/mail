@@ -238,7 +238,7 @@ std::string style_up(const std::string &l, unsigned &open) {
     for (size_t i = 0; i < l.size(); i++) {
         size_t k = 0;
         for (; k < sizeof MK / sizeof *MK && MK[k].m != l[i]; k++) {}
-        if (k == sizeof MK / sizeof *MK) {
+        if (k == sizeof MK / sizeof *MK || !text::is_marker(l, i)) {
             o += l[i];
             continue;
         }
@@ -387,14 +387,14 @@ int open_url(const std::string &url) {
     return 0;
 }
 
-std::vector<Post> feed_posts(const view::Feed &f, size_t width) {
+std::vector<Post> feed_posts(const view::Feed &f, size_t width, size_t *indent) {
     std::vector<Post> out;
     int bucket = -1;
     size_t maxn = 0;
     for (const view::FeedRow &r : f.rows) maxn = std::max(maxn, r.n);
     size_t gw = std::to_string(maxn).size() + 1;  // the number, then its space
     std::string ind(gw, ' ');
-    size_t bw = width > gw + 8 ? width - gw : 8;
+    if (indent) *indent = gw;
     for (const view::FeedRow &r : f.rows) {
         const Item &i = f.items[r.n - 1];
         Post p;
@@ -405,6 +405,7 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width) {
             p.lines.push_back(
                 heading(bucket == 0 ? "no deadline" : bucket == 1 ? "upcoming" : "overdue"));
             p.lines.push_back("");
+            p.head = p.lines.size();
         }
         // event_at is when it was posted upstream; fetched_at is the best guess when it is missing
         std::string posted = date_short(view::ymd_local(i.event_at ? i.event_at : i.fetched_at));
@@ -437,7 +438,7 @@ std::vector<Post> feed_posts(const view::Feed &f, size_t width) {
         }
         std::string link = std::string("4;") + accent();
         unsigned open = 0;
-        for (const auto &l : wrap(rest, bw)) {
+        for (const auto &l : wrap(rest, width)) {
             if (l.compare(0, 4, "http") == 0 && l.find(' ') == std::string::npos)
                 p.lines.push_back(ind + c(link.c_str(), l));
             else p.lines.push_back(ind + (l == text::TASK_NOTE  // set by teams.cpp, not a body line

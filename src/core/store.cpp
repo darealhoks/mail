@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS absences(
 );
 )";
 
-constexpr int SCHEMA_VERSION = 6;
+constexpr int SCHEMA_VERSION = 7;  // 7: no schema change, reruns the watermark heal below
 
 std::runtime_error err(sqlite3 *db) {
     return std::runtime_error(std::string("store: ") + sqlite3_errmsg(db));
@@ -206,6 +206,12 @@ Store::Store(const std::string &path) {
         // per-lesson timetable changes became one item per day, so their src_uid shape changed;
         // the old rows would otherwise sit in the feed forever as duplicates
         if (was && was < 6) exec(db, "DELETE FROM items WHERE src_uid LIKE 'tt:%'");
+        // no AUTOINCREMENT: after a delete ids restart at max+1, so a seen watermark left above
+        // the table would read every insert as old until ids climb past it. every delete
+        // must be followed by this
+        exec(db, "UPDATE state SET value=(SELECT COALESCE(MAX(id),0) FROM items)"
+                 " WHERE key LIKE 'seen_%'"
+                 " AND CAST(value AS INTEGER)>(SELECT COALESCE(MAX(id),0) FROM items)");
         // must be a literal number: sqlite takes an unquoted identifier here as the string 0
         exec(db, ("PRAGMA user_version=" + std::to_string(SCHEMA_VERSION)).c_str());
     }
