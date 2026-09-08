@@ -264,15 +264,29 @@ Absences absence_rows(Store &s, const std::vector<std::string> &filters) {
 }
 
 static void compact(Timetable &t) {
-    // an hour nobody has all week (a 0th hour, the long tail) is not a column worth its width
+    // trim only the empty ends of the hour axis: a gap in the middle is a break, and a day
+    // with no lessons but a whole-day event still gets its row
     auto used = [&](size_t d, size_t h) { return t.grid[d * t.hours.size() + h] != nullptr; };
-    std::vector<size_t> keep_h, keep_d;
+    auto has_note = [&](size_t d) {
+        for (const auto &n : t.notes)
+            if (n.first == t.days[d]) return true;
+        return false;
+    };
+    size_t first = t.hours.size(), last = 0;
     for (size_t h = 0; h < t.hours.size(); h++)
         for (size_t d = 0; d < t.days.size(); d++)
-            if (used(d, h)) { keep_h.push_back(h); break; }
-    for (size_t d = 0; d < t.days.size(); d++)
+            if (used(d, h)) {
+                first = std::min(first, h);
+                last = h;
+                break;
+            }
+    std::vector<size_t> keep_h, keep_d;
+    for (size_t h = first; h < t.hours.size() && h <= last; h++) keep_h.push_back(h);
+    for (size_t d = 0; d < t.days.size(); d++) {
+        if (has_note(d)) { keep_d.push_back(d); continue; }
         for (size_t h = 0; h < t.hours.size(); h++)
             if (used(d, h)) { keep_d.push_back(d); break; }
+    }
     std::vector<const Lesson *> grid;
     for (size_t d : keep_d)
         for (size_t h : keep_h) grid.push_back(t.grid[d * t.hours.size() + h]);
@@ -306,15 +320,35 @@ Timetable timetable(Store &s, const std::string &monday) {
         if (std::find(t.hours.begin(), t.hours.end(), l.hour) == t.hours.end())
             t.hours.push_back(l.hour);
     }
+    // a day whose only content is a whole-day event has no lesson rows to name it
+    for (const auto &n : t.notes)
+        if (std::find(t.days.begin(), t.days.end(), n.first) == t.days.end())
+            t.days.push_back(n.first);
+    std::sort(t.days.begin(), t.days.end());
     std::sort(t.hours.begin(), t.hours.end(), [](const std::string &a, const std::string &b) {
         return atoi(a.c_str()) < atoi(b.c_str());
     });
+    // the axis runs the whole hour range: a gap in the middle is a break, not a column to drop
+    if (!t.hours.empty())
+        for (int h = atoi(t.hours.front().c_str()) + 1, last = atoi(t.hours.back().c_str());
+             h < last; h++) {
+            std::string n = std::to_string(h);
+            if (std::find(t.hours.begin(), t.hours.end(), n) == t.hours.end())
+                t.hours.insert(t.hours.begin() + (h - atoi(t.hours.front().c_str())), n);
+        }
     t.grid.assign(t.days.size() * t.hours.size(), nullptr);
     for (const Lesson &l : t.rows) {
         if (l.subject.empty()) continue;  // free periods are stored as empty lessons
         size_t d = std::find(t.days.begin(), t.days.end(), l.date) - t.days.begin();
         size_t h = std::find(t.hours.begin(), t.hours.end(), l.hour) - t.hours.begin();
         t.grid[d * t.hours.size() + h] = &l;
+    }
+    for (std::string b = s.get_state("bakalari.hours"); !b.empty();) {
+        size_t semi = b.find(';'), eq = b.find('='), dash = b.find('-');
+        if (semi == std::string::npos || eq > semi || dash > semi) break;
+        t.bells[b.substr(0, eq)] = {b.substr(eq + 1, dash - eq - 1),
+                                    b.substr(dash + 1, semi - dash - 1)};
+        b = b.substr(semi + 1);
     }
     compact(t);
     return t;

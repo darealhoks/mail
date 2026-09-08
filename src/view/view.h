@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -89,14 +90,21 @@ struct Timetable {
     std::vector<std::string> hours;  // hour numbers, ascending
     std::vector<const Lesson *> grid;  // days.size() * hours.size(), null where free
     const Lesson *at(size_t day, size_t hour) const { return grid[day * hours.size() + hour]; }
-    // an hour column's start (end=false) or end time, from the first lesson that has them
+    std::map<std::string, std::pair<std::string, std::string>> bells;  // hour -> begin,end
+    // an hour column's start (end=false) or end time, from the first lesson that has them, or
+    // from the bell schedule when no lesson occupies the hour at all
     std::string edge(size_t hour, bool end) const {
+        std::string t;
         for (const Lesson &l : rows)
             if (l.hour == hours[hour] && !l.begins.empty()) {
-                const std::string &t = end ? l.ends : l.begins;
-                return t.size() > 1 && t[0] == '0' ? t.substr(1) : t;
+                t = end ? l.ends : l.begins;
+                break;
             }
-        return "";
+        if (t.empty()) {
+            auto it = bells.find(hours[hour]);
+            if (it != bells.end()) t = end ? it->second.second : it->second.first;
+        }
+        return t.size() > 1 && t[0] == '0' ? t.substr(1) : t;
     }
     // "8:00-8:45"; empty when the hour has no stored times
     std::string span(size_t hour) const {

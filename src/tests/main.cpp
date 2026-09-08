@@ -382,6 +382,23 @@ int check_store() {
         CHECK(!have.permanent && have.days == std::vector<std::string>{"2026-08-17"});
         CHECK(fall.permanent && fall.days == std::vector<std::string>{"2026-08-26"});
         CHECK(fall.rows[0].subject == "MAT");
+
+        // a lunch gap keeps its column; a day whose only entry is a whole-day event keeps its row
+        Lesson a1 = l, a4 = l, day = l;
+        a1.date = a4.date = "2026-09-07";
+        a1.hour = "1";
+        a4.hour = "4";
+        day.date = "2026-09-08";
+        day.hour = "";
+        day.subject = "Reditelske volno";
+        t.put_lessons("bakalari", "2026-09-07", "2026-09-13", {a1, a4, day});
+        view::Timetable gap = view::timetable(t, "2026-09-07");
+        CHECK(gap.hours == (std::vector<std::string>{"1", "2", "3", "4"}));
+        CHECK(gap.days == (std::vector<std::string>{"2026-09-07", "2026-09-08"}));
+        CHECK(!gap.at(0, 0) == false && !gap.at(0, 1) && !gap.at(1, 0));
+        // the bell schedule times an hour that no lesson occupies
+        t.set_state("bakalari.hours", "2=9:00-9:45;3=10:00-10:45;");
+        CHECK(view::timetable(t, "2026-09-07").span(1) == "9:00-9:45");
     }
     scrub();
     return 0;

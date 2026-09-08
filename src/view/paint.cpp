@@ -674,6 +674,25 @@ std::vector<std::string> grid_lines(const view::Timetable &tt, size_t cd, size_t
             block[r] = (r == 0 ? c(tt.days[d] == today ? accent() : "90", DAYNAME[tm.tm_wday])
                                : std::string(2, ' ')) +
                        " ";
+        // a day with no lessons but a whole-day event: the event fills the row, so the day
+        // stays on the grid instead of vanishing from it
+        std::string whole;
+        for (size_t h = 0; h < g.nh; h++)
+            if (tt.at(d, h)) { whole.clear(); break; }
+            else if (whole.empty())
+                for (const auto &n : tt.notes)
+                    if (n.first == tt.days[d]) { whole = n.second; break; }
+        if (!whole.empty()) {
+            size_t inner = g.nh * (cw + 1) - 1;
+            if (utf8_len(whole) > inner) whole = plain_cut(whole, inner);
+            size_t lead = (inner - utf8_len(whole)) / 2;
+            block[0] += c("90", bar) + c("39", std::string(lead, ' ') + whole +
+                                              std::string(inner - utf8_len(whole) - lead, ' '));
+            for (size_t r = 1; r < cell_rows; r++) block[r] += c("90", bar) + std::string(inner, ' ');
+            for (auto &b : block) out.push_back(b + c("90", bar));
+            out.push_back(c("90", rule));
+            continue;
+        }
         for (size_t h = 0; h < g.nh; h++) {
             const Lesson *l = tt.at(d, h);
             std::vector<std::string> txt(cell_rows);

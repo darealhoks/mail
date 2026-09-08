@@ -1,6 +1,7 @@
 #include "bakalari.h"
 
 #include <algorithm>
+#include <set>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -399,6 +400,7 @@ std::vector<Item> fetch(Store &store) {
         Side S = side_tables(j.root, &by_name);
         std::vector<Lesson> grid;
         std::string monday;
+        std::set<std::string> placeheld;  // one placeholder cell per hour, not one per atom
         for (auto day : arr(j.root, "Days", "timetable")) {
             std::string dd = s(day, "Date").substr(0, 10);
             if (monday.empty()) monday = dd;
@@ -431,7 +433,16 @@ std::vector<Item> fetch(Store &store) {
                         std::find(g.klass.begin(), g.klass.end(), l.subject) == g.klass.end())
                         g.klass.push_back(l.subject);
                 }
-                if (!l.hour.empty() && !l.subject.empty()) grid.push_back(std::move(l));
+                if (l.hour.empty()) continue;
+                if (l.subject.empty()) {
+                    // an atom with no subject but a change is an hour taken by something, not
+                    // a free hour; a subjectless "Removed" is a slot that never was a lesson
+                    if (!changed || type == "Removed") continue;
+                    l.subject = trim(s(ch, "TypeAbbrev"));
+                    if (l.subject.empty()) l.subject = what.empty() ? "—" : what;
+                    if (!placeheld.insert(dd + "\x1f" + l.hour).second) continue;
+                }
+                grid.push_back(std::move(l));
             }
         }
         if (monday.empty()) continue;
@@ -445,6 +456,14 @@ std::vector<Item> fetch(Store &store) {
                 grid.push_back(std::move(n));
             }
         store.put_lessons("bakalari", monday, sunday, grid);
+        // "1=8:00-8:45;..." — the whole bell schedule, so a break with no lesson still shows
+        // its times in the grid header (view::timetable reads it back)
+        std::string bells;
+        for (auto &[id, cap] : S.hour) {
+            if (cap.empty() || S.begins[id].empty()) continue;
+            bells += cap + "=" + S.begins[id] + "-" + S.ends[id] + ";";
+        }
+        if (!bells.empty()) store.set_state("bakalari.hours", bells);
     }
 
     for (auto &kv : changes) {
